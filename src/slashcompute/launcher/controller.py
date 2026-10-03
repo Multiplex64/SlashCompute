@@ -1,4 +1,4 @@
-"""Start/stop the coordinator and agent; persist launcher settings."""
+"""Start/stop the coordinator, the MLX agent and the inference node; persist launcher settings."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import signal
 import subprocess
 import sys
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -26,6 +26,7 @@ class LauncherError(Exception):
 
 
 FINISHES = ("carbon", "poster", "signal", "thermal", "void")
+TRANSPORTS = ("direct", "relay")
 
 
 @dataclass
@@ -37,10 +38,17 @@ class LauncherSettings:
     finish: str = "carbon"
     session_token: str = ""
     grant_split: int = 0
+    training: bool = True              # lend this Mac to MLX fine-tunes
+    inference: bool = False            # also host llama.cpp layers for the pool's LLMs
+    inference_memory_gb: int = 0       # 0 = automatic (75% of RAM minus 4 GiB)
+    inference_head: bool = True        # may run llama-server (needs the model file; uploads are pushed)
+    models_dir: str = "~/models"
+    transport: str = "direct"          # host only: direct (LAN) or relay (internet, RPC via the coordinator)
 
     def clamp(self) -> "LauncherSettings":
         mode = self.mode if self.mode in ("host", "join") else "host"
         finish = self.finish if self.finish in FINISHES else "carbon"
+        transport = self.transport if self.transport in TRANSPORTS else "direct"
         try:
             gpu = max(1, min(100, int(self.gpu_percent)))
         except (TypeError, ValueError):
@@ -49,10 +57,17 @@ class LauncherSettings:
             split = max(0, min(100, int(self.grant_split)))
         except (TypeError, ValueError):
             split = 0
+        try:
+            mem = max(0, min(1024, int(self.inference_memory_gb)))
+        except (TypeError, ValueError):
+            mem = 0
         return LauncherSettings(
             mode=mode, url=str(self.url or ""), gpu_percent=gpu,
             contribute=bool(self.contribute), finish=finish,
             session_token=str(self.session_token or ""), grant_split=split,
+            training=bool(self.training), inference=bool(self.inference), inference_memory_gb=mem,
+            inference_head=bool(self.inference_head), models_dir=str(self.models_dir or "~/models"),
+            transport=transport,
         )
 
 
@@ -68,6 +83,11 @@ class StatusSnapshot:
     agent_pid: Optional[int] = None
     lan_ip: str = ""
     last_error: str = ""
+    inference_running: bool = False
+    inference_pid: Optional[int] = None
+    inference_status: dict = field(default_factory=dict)   # the node's status.json
+    inference_nodes: int = 0
+    inference_transport: str = ""
 
 
 PopenFn = Callable[..., Any]
@@ -146,6 +166,12 @@ class Launcher:
             finish=raw.get("finish", "carbon"),
             session_token=raw.get("session_token", ""),
             grant_split=raw.get("grant_split", 0),
+            training=raw.get("training", True),
+            inference=raw.get("inference", False),
+            inference_memory_gb=raw.get("inference_memory_gb", 0),
+            inference_head=raw.get("inference_head", True),
+            models_dir=raw.get("models_dir", "~/models"),
+            transport=raw.get("transport", "direct"),
         ).clamp()
 
     def save_settings(self, settings: LauncherSettings) -> None:
@@ -164,9 +190,12 @@ class Launcher:
             return f"http://127.0.0.1:{self.cfg.coordinator_port}"
         return self.coordinator_url(s)
 
-    def coordinator_argv(self) -> list[str]:
-        return [self.python, "-m", "slashcompute.coordinator.main", "serve",
+    def coordinator_argv(self, transport: str = "direct") -> list[str]:
+        argv = [self.python, "-m", "slashcompute.coordinator.main", "serve",
                 "--home", str(self.home)]
+        if transport != "direct":
+            argv.extend(["--inference-transport", transport])
+        return argv
 
     def agent_argv(self, url: str, gpu_percent: int, session_token: str = "") -> list[str]:
         argv = [
@@ -177,6 +206,69 @@ class Launcher:
         if session_token:
             argv.extend(["--session-token", session_token])
         return argv
+
+    def inference_argv(self, url: str, settings: LauncherSettings) -> list[str]:
+        s = settings.clamp()
+        argv = [
+            self.python, "-m", "slashcompute.inference.node", "start",
+            "--url", url, "--home", str(self.home), "--models-dir", s.models_dir,
+            "--memory-gb", str(s.inference_memory_gb), "--head" if s.inference_head else "--no-head",
+        ]
+        if s.session_token:
+            argv.extend(["--session-token", s.session_token])
+        return argv
+
+    @property
+    def inference_pid_path(self) -> Path:
+        return self.home / "inference" / "node.pid"
+
+    def read_inference_pid(self) -> Optional[int]:
+        try:
+            pid = int(self.inference_pid_path.read_text().strip())
+        except (OSError, ValueError):
+            return None
+        return pid if process_alive(pid) else None
+
+    def inference_status(self) -> dict:
+        try:
+            data = json.loads((self.home / "inference" / "status.json").read_text())
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _stop_inference(self, wait: float = 0.0) -> None:
+        pid = self.read_inference_pid()
+        if pid is None:
+            return
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            return
+        deadline = time.monotonic() + wait
+        while time.monotonic() < deadline and process_alive(pid):
+            time.sleep(0.05)
+
+    def _inference_args_path(self) -> Path:
+        return self.home / "inference.args"
+
+    def _restart_coordinator(self, settings: LauncherSettings) -> None:
+        """The inference transport is fixed when the coordinator starts: restart ours to change it."""
+        pid = self.read_coordinator_pid()
+        if pid is None:
+            self.last_error = ("Inference transport can only change when this app started the coordinator; "
+                               "restart it with --inference-transport " + settings.transport + ".")
+            return
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+        deadline = time.monotonic() + 8.0
+        while time.monotonic() < deadline and process_alive(pid):
+            time.sleep(0.05)
+        self.coordinator_pid_path.unlink(missing_ok=True)
+        self._spawn(self.coordinator_argv(settings.transport), self.log_dir / "coordinator.log",
+                    pid_writer=self.write_coordinator_pid)
+        self.wait_health(self.proxy_url(settings))
 
     def read_coordinator_pid(self) -> Optional[int]:
         if not self.coordinator_pid_path.exists():
@@ -227,10 +319,13 @@ class Launcher:
             raise LauncherError(self.last_error)
 
         want_coord = s.mode == "host"
-        want_agent = s.mode == "join" or s.contribute
+        lend = s.mode == "join" or s.contribute
+        want_agent = lend and s.training
+        want_inference = lend and s.inference
 
-        if want_coord and not self.poll_health(url):
-            self._spawn(self.coordinator_argv(), self.log_dir / "coordinator.log",
+        health = self.poll_health(url) if want_coord else None
+        if want_coord and not health:
+            self._spawn(self.coordinator_argv(s.transport), self.log_dir / "coordinator.log",
                         pid_writer=self.write_coordinator_pid)
             check = self.proxy_url(s) if s.mode == "host" else url
             if not (self.wait_health(check) or self.poll_health(url)):
@@ -238,8 +333,12 @@ class Launcher:
                     f"Coordinator started but is not answering {url}/health yet. "
                     f"Watch {self.log_dir / 'coordinator.log'}."
                 )
+        elif want_coord and health.get("inference_transport", "direct") != s.transport:
+            self._restart_coordinator(s)
 
         agent_url = self.proxy_url(s) if s.mode == "host" else url
+        if not want_agent and self._agent_running():
+            request_stop(self.paths)
         if want_agent:
             if s.mode == "join" and not self.poll_health(url):
                 self.last_error = f"No coordinator at {url}."
@@ -256,6 +355,19 @@ class Launcher:
                             self.log_dir / "agent.log")
                 self._write_bound_session(s.session_token)
 
+        if want_inference:
+            if s.mode == "join" and not self.poll_health(url):
+                self.last_error = f"No coordinator at {url}."
+                raise LauncherError(self.last_error)
+            argv = self.inference_argv(agent_url, s)
+            if self.read_inference_pid() is not None and self._read_inference_args() != argv:
+                self._stop_inference(wait=10.0)   # settings changed: drain, then rejoin with the new ones
+            if self.read_inference_pid() is None:
+                self._spawn(argv, self.log_dir / "inference.log")
+                self._inference_args_path().write_text(json.dumps(argv))
+        else:
+            self._stop_inference()
+
         snap = self.snapshot(s)
         if snap.coordinator_up and "not answering" in (self.last_error or ""):
             self.last_error = ""
@@ -265,6 +377,7 @@ class Launcher:
     def stop(self) -> StatusSnapshot:
         self.last_error = ""
         request_stop(self.paths)
+        self._stop_inference()
         pid = self.read_coordinator_pid()
         if pid is not None:
             try:
@@ -313,6 +426,7 @@ class Launcher:
         if agent_pid and not agent_running:
             self.paths.clear_pid()
             agent_pid = None
+        inference_pid = self.read_inference_pid()
         return StatusSnapshot(
             coordinator_up=bool(health),
             nodes=int(health.get("nodes", 0) or 0),
@@ -324,7 +438,18 @@ class Launcher:
             agent_pid=agent_pid if agent_running else None,
             lan_ip=self._lan_ip(),
             last_error=self.last_error,
+            inference_running=inference_pid is not None,
+            inference_pid=inference_pid,
+            inference_status=self.inference_status() if inference_pid is not None else {},
+            inference_nodes=int(health.get("inference_nodes", 0) or 0),
+            inference_transport=str(health.get("inference_transport", "") or ""),
         )
+
+    def _read_inference_args(self) -> list[str]:
+        try:
+            return json.loads(self._inference_args_path().read_text())
+        except (OSError, ValueError):
+            return []
 
     def _agent_session_path(self) -> Path:
         return self.home / "agent.session"

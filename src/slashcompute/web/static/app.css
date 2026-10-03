@@ -546,6 +546,33 @@ input[type="range"]::-webkit-slider-thumb {
 .leaders .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .leaders .flops { color: var(--warm); font-size: 11px; white-space: nowrap; }
 
+/* ------------------------------------------------------------ llms */
+
+.chat {
+  background: #0a0a0a;
+  border: 1px solid var(--line-2);
+  min-height: 180px;
+  max-height: 380px;
+  overflow: auto;
+  padding: 12px;
+  margin-bottom: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.say { background: var(--slab-2); padding: 10px 12px; box-shadow: inset 3px 0 0 var(--line-2); }
+.say.bot { box-shadow: inset 3px 0 0 var(--sig); }
+.say label { display: block; color: var(--dim); font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; }
+.say p { margin: 4px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.55; }
+.say small { display: block; margin-top: 8px; color: var(--warm); font-size: 10.5px; }
+
+#l-draft { width: 100%; resize: vertical; }
+#l-upbar { margin-top: 10px; }
+#view-llm .seg { margin-top: 6px; }
+#view-llm .list { margin-bottom: 16px; }
+#l-pick.is-disabled { opacity: 0.4; pointer-events: none; }
+
 /* ------------------------------------------------------------ pool */
 
 .banner { background: var(--hot); color: var(--carbon); padding: 12px 16px; margin-bottom: 16px; }

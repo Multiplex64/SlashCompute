@@ -10,3 +10,6 @@ build/
 # runtime state
 .slashcompute/
 *.db
+
+# llama.cpp built by scripts/build_llama.sh
+vendor/

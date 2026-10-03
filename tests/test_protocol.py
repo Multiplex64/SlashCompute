@@ -1,0 +1,46 @@
+import pytest
+from pydantic import ValidationError
+
+from slashcompute.common import protocol as P
+from slashcompute.jobs import LoraFinetuneSpec, parse_spec
+
+
+def _device():
+    return P.DeviceProfile(
+        chip="Apple M5", memory_total_bytes=16 << 30, memory_available_bytes=8 << 30,
+        working_set_bytes=12 << 30, memory_contrib_bytes=6 << 30,
+        matmul_tflops=10.0, mem_bandwidth_gbps=120.0,
+    )
+
+
+def test_agent_message_roundtrip():
+    msg = P.Register(node_id="n1", name="mac", device=_device(), data_host="10.0.0.2",
+                     data_port=9700, gpu_percent=50)
+    parsed = P.parse_agent_message(P.dump(msg))
+    assert isinstance(parsed, P.Register)
+    assert parsed == msg
+
+
+def test_coordinator_message_roundtrip():
+    spec = LoraFinetuneSpec(dataset_path="/tmp/d.jsonl", steps=3)
+    msg = P.StageAssignment(
+        job_id="j", epoch=1, stage_idx=0, num_stages=2, layer_start=0, layer_end=4,
+        num_layers=8, spec=spec, next_peer=P.PeerAddr(node_id="b", host="h", port=1),
+        checkpoint_every=25, verify_ring_size=8,
+    )
+    parsed = P.parse_coordinator_message(P.dump(msg))
+    assert isinstance(parsed, P.StageAssignment)
+    assert parsed.spec.steps == 3 and parsed.next_peer.port == 1
+
+
+def test_unknown_message_rejected():
+    with pytest.raises(ValidationError):
+        P.parse_agent_message({"type": "nope"})
+
+
+def test_spec_validation():
+    with pytest.raises(ValidationError):
+        LoraFinetuneSpec(dataset_path="x", batch_size=3, microbatches=2)
+    with pytest.raises(ValueError):
+        parse_spec({"kind": "run_arbitrary_code", "dataset_path": "x"})
+    assert parse_spec({"dataset_path": "x"}).kind == "lora_finetune"

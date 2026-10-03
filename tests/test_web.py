@@ -69,6 +69,8 @@ def test_index_and_css(tmp_path):
         for tab in (b"contributions", b"usage", b"grants", b"pool"):
             assert b'data-tab="' + tab + b'"' in r.content
         assert b'data-ink="signal"' in r.content
+        assert b"/static/logo.png" in r.content
+        assert c.get("/static/logo.png").status_code == 200
         assert b'data-file="community"' not in r.content
         assert b">COM<" not in r.content
         js = c.get("/static/app.js")

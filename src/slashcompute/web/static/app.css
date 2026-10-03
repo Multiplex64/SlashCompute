@@ -96,11 +96,24 @@ body {
 }
 
 .brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 8px;
+}
+
+.brand-mark {
+  width: 56px;
+  height: 56px;
+  flex: none;
+  display: block;
+}
+
+.brand-name {
   font-family: "Archivo Black", sans-serif;
   font-size: 32px;
   line-height: 0.9;
   letter-spacing: -0.03em;
-  padding: 0 8px;
 }
 
 .brand .slash { color: var(--sig); }

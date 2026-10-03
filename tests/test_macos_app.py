@@ -55,4 +55,6 @@ def test_install_app_writes_plist_and_launcher(tmp_path):
     assert str(repo) in launch
     assert "-m slashcompute.launcher.main" in launch
     assert os.access(dest / "Contents" / "MacOS" / "compute", os.X_OK)
-    assert (dest / "Contents" / "Resources" / "icon.png").is_file()
+    icon = dest / "Contents" / "Resources" / "icon.png"
+    assert icon.is_file()
+    assert icon.read_bytes() == (ROOT / "scripts" / "macos" / "icon.png").read_bytes()

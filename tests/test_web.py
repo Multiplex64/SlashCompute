@@ -1,3 +1,5 @@
+import json
+
 from fastapi.testclient import TestClient
 
 from slashcompute.launcher.controller import Launcher, LauncherSettings
@@ -23,6 +25,16 @@ class FakeHTTP:
             headers = {"content-type": "application/json"}
             def json(self_inner):
                 return {"ok": True, "nodes": 1, "jobs": 0}
+        return R()
+
+    def post(self, url: str, content=None, headers=None, timeout: float = 1.0, **_):
+        class R:
+            status_code = 200
+            content = b'{"user":{"id":"u1","email":"ada@lan.test"},"token":"sess"}'
+            headers = {"content-type": "application/json",
+                       "set-cookie": "slashcompute_session=sess; HttpOnly; SameSite=lax"}
+            def json(self_inner):
+                return {"user": {"id": "u1", "email": "ada@lan.test"}, "token": "sess"}
         return R()
 
 
@@ -124,7 +136,9 @@ def test_proxy_allows_health_and_blocks_other(tmp_path):
         assert c.get("/api/coord/health").status_code == 200
         assert c.get("/api/coord/auth/me").status_code == 200
         assert c.get("/api/coord/verify/secret").status_code == 404
-        assert c.get("/api/shell").json()["generation"] >= 2
+        assert c.get("/api/coord/jobs/../verify/secret").status_code == 404
+        assert c.get("/api/coord/VERIFY/secret").status_code == 404
+        assert c.get("/api/shell").json()["generation"] >= 5
 
 
 class RoutedHTTP:
@@ -205,29 +219,134 @@ def test_stop_agent_endpoint_leaves_coordinator(tmp_path, monkeypatch):
     assert (222, 15) in kills and (111, 15) not in kills
 
 
-def test_sample_grants_flow(tmp_path):
-    T = 1e12
+class GrantHTTP:
+    """In-memory coordinator stand-in for the live grants adapter."""
+
+    def __init__(self) -> None:
+        self.grants = [
+            {"id": "g1", "title": "Parser", "author": "Ada",
+             "body": "Need FLOPs for a parser thesis project.",
+             "goal_flops": 50e12, "received_flops": 10e12, "status": "approved", "progress": 0.2},
+            {"id": "g2", "title": "Waiting", "author": "Bea",
+             "body": "Waiting for review of this grant request.",
+             "goal_flops": 20e12, "received_flops": 0.0, "status": "pending", "progress": 0.0},
+        ]
+        self.donated = 0.0
+
+    def _path(self, url: str) -> str:
+        return "/" + url.split("://", 1)[-1].split("/", 1)[-1].split("?")[0]
+
+    def _resp(self, payload, status=200):
+        raw = json.dumps(payload).encode()
+
+        class R:
+            status_code = status
+            content = raw
+            headers = {"content-type": "application/json"}
+
+            def json(self_inner):
+                return payload
+        return R()
+
+    def get(self, url: str, timeout: float = 1.0, params=None, headers=None):
+        path = self._path(url)
+        if path == "/grants":
+            return self._resp(self.grants)
+        if path == "/auth/me":
+            return self._resp({
+                "user": {"id": "u1", "name": "Ada", "admin": True, "grant_split": 10,
+                         "accepted_terms": True},
+                "credits": {"balance": 80e12, "lifetime_earned": 100e12},
+            })
+        if path == "/credits/transactions":
+            return self._resp({"items": [
+                {"kind": "donate", "amount": -self.donated} if self.donated else {"kind": "earn", "amount": 1},
+            ]})
+        if path == "/community/leaderboard":
+            return self._resp([{"user_id": "u1", "name": "Ada", "lifetime_earned": 100e12}])
+        raise ConnectionError("down")
+
+    def post(self, url: str, content=None, headers=None, timeout: float = 1.0, **_):
+        path = self._path(url)
+        body = json.loads(content or b"{}")
+        if path == "/grants":
+            title = str(body.get("title", "")).strip()
+            text = str(body.get("body", "")).strip()
+            if len(title) < 4 or len(text) < 20:
+                return self._resp({"detail": "Describe the need: a title and at least a short paragraph."}, 400)
+            row = {"id": "g3", "title": title, "author": "You", "body": text,
+                   "goal_flops": float(body.get("goal_flops") or 0), "received_flops": 0.0,
+                   "status": "pending", "progress": 0.0}
+            self.grants.append(row)
+            return self._resp(row)
+        if path.endswith("/donate"):
+            gid = path.split("/")[2]
+            g = next((x for x in self.grants if x["id"] == gid), None)
+            if g is None or g["status"] != "approved":
+                return self._resp({"detail": "Only approved grants can receive FLOPs."}, 400)
+            flops = float(body.get("flops") or 0)
+            if flops <= 0:
+                return self._resp({"detail": "Enter a number."}, 400)
+            g["received_flops"] += flops
+            g["progress"] = g["received_flops"] / g["goal_flops"]
+            self.donated += flops
+            return self._resp(g)
+        if "/admin/grants/" in path and path.endswith("/review"):
+            gid = path.split("/")[3]
+            g = next((x for x in self.grants if x["id"] == gid), None)
+            if g is None or g["status"] != "pending":
+                return self._resp({"detail": "This grant was already reviewed."}, 400)
+            g["status"] = "approved" if body.get("approve") else "declined"
+            return self._resp(g)
+        return self._resp({"detail": "not found"}, 404)
+
+
+def test_proxy_forwards_set_cookie(tmp_path):
+    app, launcher, _ = _shell(tmp_path, http=FakeHTTP({"ok": True}))
+    launcher.save_settings(LauncherSettings(mode="host"))
+    with TestClient(app) as c:
+        r = c.post("/api/coord/auth/login", json={"email": "ada@lan.test", "password": "password1"})
+        assert r.status_code == 200
+        assert "slashcompute_session=sess" in r.headers.get("set-cookie", "")
+
+
+def test_live_grants_empty_when_coordinator_down(tmp_path):
     app, _, _ = _shell(tmp_path, http=RoutedHTTP({}))
     with TestClient(app) as c:
         board = c.get("/api/grants?sort=least").json()
-        assert board["sample"] is True and board["pledged"] == 0
-        progress = [g["progress"] for g in board["grants"]]
-        assert progress == sorted(progress)
-        target = board["grants"][0]
+    assert board["sample"] is False
+    assert board["grants"] == [] and board["pending"] == []
+    assert board["online"] is False
 
-        r = c.post(f"/api/grants/{target['id']}/fund", json={"amount": 10 * T})
-        assert r.status_code == 200, r.text
-        assert r.json()["pledged"] == 10 * T
 
-        too_much = c.post(f"/api/grants/{target['id']}/fund", json={"amount": 10_000 * T})
-        assert too_much.status_code == 400
+def test_live_grants_flow(tmp_path):
+    T = 1e12
+    app, launcher, _ = _shell(tmp_path, http=GrantHTTP())
+    launcher.save_settings(LauncherSettings(mode="host"))
+    with TestClient(app) as c:
+        board = c.get("/api/grants?sort=top").json()
+        assert board["sample"] is False and board["online"] is True
+        assert board["grants"][0]["summary"].startswith("Need FLOPs")
+        assert board["grants"][0]["goal"] == 50e12
+        assert board["pending"][0]["title"] == "Waiting"
+        assert board["leaders"][0]["name"] == "Ada"
+        assert board["available"] == 80e12
 
-        made = c.post("/api/grants", json={"title": "Parser", "summary": "For my thesis",
-                                            "goal": 50 * T}).json()
-        new = made["pending"][-1]
-        assert new["title"] == "Parser"
+        funded = c.post("/api/grants/g1/fund", json={"amount": 10 * T})
+        assert funded.status_code == 200, funded.text
+        assert funded.json()["pledged"] == 10 * T
+        assert funded.json()["grants"][0]["raised"] == 20e12
+
+        made = c.post("/api/grants", json={
+            "title": "Lecture notes",
+            "summary": "Fine-tune a helper on my course notes for first years.",
+            "goal": 50 * T,
+        })
+        assert made.status_code == 200, made.text
+        assert any(g["title"] == "Lecture notes" for g in made.json()["pending"])
         assert c.post("/api/grants", json={"title": "", "summary": "x", "goal": 1}).status_code == 400
 
-        approved = c.post(f"/api/grants/{new['id']}/review", json={"approve": True}).json()
-        assert any(g["id"] == new["id"] for g in approved["grants"])
-        assert c.post(f"/api/grants/{new['id']}/review", json={"approve": True}).status_code == 400
+        approved = c.post("/api/grants/g2/review", json={"approve": True}).json()
+        assert any(g["id"] == "g2" for g in approved["grants"])
+        again = c.post("/api/grants/g2/review", json={"approve": True})
+        assert again.status_code == 400

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import uuid
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -17,7 +18,7 @@ from slashcompute.community.credits import CreditError
 from slashcompute.community.http import _token, mount_community
 from slashcompute.common.config import EngineConfig
 from slashcompute.common.protocol import Register, dump, parse_agent_message
-from slashcompute.coordinator.core import Coordinator
+from slashcompute.coordinator.core import MAX_DATASET_BYTES, Coordinator
 from slashcompute.coordinator.db import Verification
 from slashcompute.jobs import parse_spec
 
@@ -136,6 +137,8 @@ def create_app(cfg: EngineConfig, advertise: bool = False) -> FastAPI:
     async def submit_job(body: dict, request: Request,
                          authorization: Optional[str] = Header(default=None)):
         user = _user(request, authorization)
+        if _token(request, authorization) and user is None:
+            raise HTTPException(401, "Sign in first.")
         try:
             spec = parse_spec(body)
             job = core.submit(spec)
@@ -159,9 +162,22 @@ def create_app(cfg: EngineConfig, advertise: bool = False) -> FastAPI:
         uploads = cfg.home / "uploads"
         uploads.mkdir(parents=True, exist_ok=True)
         raw = (dataset.filename or "train.jsonl").replace("\\", "/").split("/")[-1]
-        dest = uploads / f"{uuid.uuid4().hex}_{raw}"
-        dest.write_bytes(await dataset.read())
+        name = re.sub(r"[^A-Za-z0-9._-]", "", raw) or "train.jsonl"
+        if not name.lower().endswith(".jsonl"):
+            name = "train.jsonl"
+        dest = uploads / f"{uuid.uuid4().hex}_{name}"
+        buf = bytearray()
+        while True:
+            chunk = await dataset.read(1024 * 1024)
+            if not chunk:
+                break
+            if len(buf) + len(chunk) > MAX_DATASET_BYTES:
+                raise HTTPException(400, "dataset is too large.")
+            buf.extend(chunk)
+        dest.write_bytes(bytes(buf))
         user = _user(request, authorization)
+        if _token(request, authorization) and user is None:
+            raise HTTPException(401, "Sign in first.")
         try:
             spec = parse_spec({
                 "kind": "lora_finetune", "model": model, "dataset_path": str(dest),
@@ -175,8 +191,20 @@ def create_app(cfg: EngineConfig, advertise: bool = False) -> FastAPI:
         return core.job_view(job)
 
     @app.get("/jobs")
-    async def list_jobs():
-        return [core.job_view(j) for j in sorted(core.jobs.values(), key=lambda j: j.row.submitted_at)]
+    async def list_jobs(request: Request, mine: int = 0,
+                        authorization: Optional[str] = Header(default=None)):
+        jobs = sorted(core.jobs.values(), key=lambda j: j.row.submitted_at)
+        if mine:
+            user = _user(request, authorization)
+            if user is None:
+                raise HTTPException(401, "Sign in first.")
+            jobs = [j for j in jobs
+                    if (acct := core.credits.job_account(j.id)) and acct.user_id == user.id]
+        return [core.job_view(j) for j in jobs]
+
+    @app.get("/jobs/waitlist")
+    async def list_waitlist():
+        return core.waitlist()
 
     @app.get("/jobs/{job_id}")
     async def get_job(job_id: str):
@@ -200,6 +228,7 @@ def create_app(cfg: EngineConfig, advertise: bool = False) -> FastAPI:
 
     @app.get("/jobs/{job_id}/checkpoints/{step}")
     async def get_checkpoint(job_id: str, step: int):
+        _job(job_id)
         path = core.checkpoints.merged_path(job_id, step)
         if not path.exists():
             raise HTTPException(404, "checkpoint not found")

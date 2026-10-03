@@ -21,6 +21,29 @@
         <button class="nav-item" data-tab="pool" role="tab"><span class="num">04</span>Pool</button>
       </nav>
 
+      <div class="side-account" id="acct">
+        <div id="auth-gate">
+          <button type="button" class="btn primary sm block" data-act="show-auth">Sign in</button>
+        </div>
+        <form id="auth-form" hidden>
+          <input type="email" id="auth-email" placeholder="Email" autocomplete="username">
+          <input type="password" id="auth-password" placeholder="Password" autocomplete="current-password">
+          <input type="text" id="auth-name" placeholder="Name" hidden autocomplete="nickname">
+          <p class="msg" id="auth-msg"></p>
+          <button type="submit" class="btn primary sm block" id="auth-submit">Sign in</button>
+          <button type="button" class="btn ghost sm block" data-act="auth-mode">Create account</button>
+        </form>
+        <div id="auth-terms" hidden>
+          <p class="terms-box" id="terms-text"></p>
+          <button type="button" class="btn primary sm block" data-act="accept-terms">Accept terms</button>
+        </div>
+        <div id="auth-user" hidden>
+          <div class="side-row"><b id="auth-who"></b></div>
+          <p id="auth-sub"></p>
+          <button type="button" class="btn ghost sm block" data-act="logout">Sign out</button>
+        </div>
+      </div>
+
       <div class="side-status">
         <div class="side-row"><i class="sq" id="side-dot"></i><b id="side-title">Offline</b></div>
         <p id="side-sub">No pool running</p>
@@ -84,7 +107,7 @@
               <div class="right"><label>You keep</label><strong class="sig" id="split-keep">100%</strong><small id="split-keep-amt"></small></div>
             </div>
             <input type="range" class="split-range" id="split" min="0" max="100" value="0" aria-label="Share of credits given to grants">
-            <p class="hint">Credits are 1:1 with FLOPs. These are estimates from the pool's ledger until accounts return.</p>
+            <p class="hint" id="split-hint">Credits are 1:1 with FLOPs. Sign in so this split is saved on your account.</p>
           </article>
         </div>
 
@@ -131,7 +154,7 @@
               <div class="field">
                 <label>Dataset (.jsonl)</label>
                 <div class="file-row">
-                  <label class="btn ghost sm">Choose file<input type="file" id="dataset" accept=".jsonl,application/jsonl,text/plain" hidden></label>
+                  <label class="btn ghost sm">Choose file<input type="file" id="dataset" accept=".jsonl,.json,application/json,text/plain" hidden></label>
                   <span class="muted" id="dataset-name">No file chosen</span>
                 </div>
                 <p class="hint">One JSON object per line: {"text": …} or {"prompt": …, "completion": …}.</p>
@@ -139,6 +162,11 @@
               <div class="field-pair">
                 <div class="field"><label for="steps">Steps</label><input type="number" id="steps" min="1" value="10"></div>
                 <div class="field"><label for="min_stages">Min Macs</label><input type="number" id="min_stages" min="1" max="16" value="2"></div>
+              </div>
+              <div class="field" id="flop-budget" hidden>
+                <label for="max_flops">FLOP budget (TFLOPs)</label>
+                <input type="number" id="max_flops" min="1" value="50">
+                <p class="hint">Reserved from your credits before the job starts.</p>
               </div>
               <p class="msg" id="job-msg"></p>
               <button type="submit" class="btn primary block" id="job-submit">Submit job</button>
@@ -160,7 +188,7 @@
             <h1>Grants</h1>
             <p>Community requests for compute. Back a project with your grant credits, or ask for help with yours.</p>
           </div>
-          <span class="tag hot">Sample data</span>
+          <span class="tag" id="g-pill">Live</span>
         </header>
 
         <div class="toolbar">
@@ -170,7 +198,6 @@
             <button type="button" data-sort="least">Least funded</button>
           </div>
           <div class="toolbar-right">
-            <button type="button" class="btn ghost dark" id="g-admin" data-act="toggle-admin">Admin view</button>
             <button type="button" class="btn primary" data-act="toggle-request">Request a grant</button>
           </div>
         </div>
@@ -205,7 +232,7 @@
           <div class="stack" id="g-list"></div>
           <article class="card">
             <header class="card-head"><h2>Top contributors</h2></header>
-            <p class="muted">Macs ranked by FLOPs given to the pool. Live from the ledger.</p>
+            <p class="muted">Accounts ranked by FLOPs earned on this coordinator.</p>
             <ol class="leaders" id="leaders"></ol>
           </article>
         </div>

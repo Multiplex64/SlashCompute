@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from slashcompute.common.config import allowed_model
 from slashcompute.jobs.lora_finetune import LoraFinetuneSpec
 
 JOB_TYPES = {
@@ -16,4 +17,7 @@ def parse_spec(data: dict) -> JobSpec:
     kind = data.get("kind", "lora_finetune")
     if kind not in JOB_TYPES:
         raise ValueError(f"unknown job kind {kind!r}; known: {sorted(JOB_TYPES)}")
-    return JOB_TYPES[kind].model_validate({**data, "kind": kind})
+    spec = JOB_TYPES[kind].model_validate({**data, "kind": kind})
+    if not allowed_model(spec.model):
+        raise ValueError(f"model {spec.model!r} is not allowed.")
+    return spec

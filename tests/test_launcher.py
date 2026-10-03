@@ -97,7 +97,7 @@ def test_coordinator_and_agent_argv(tmp_path):
     assert launcher.agent_argv("http://192.168.1.20:8765", 40) == [
         "/opt/venv/bin/python", "-m", "slashcompute.agent.main", "start",
         "--url", "http://192.168.1.20:8765", "--gpu-percent", "40",
-        "--no-sandbox", "--home", str(tmp_path),
+        "--home", str(tmp_path),
     ]
     assert "--session-token" in launcher.agent_argv(
         "http://192.168.1.20:8765", 40, session_token="tok",
@@ -132,7 +132,7 @@ def test_start_host_spawns_coordinator_and_agent(tmp_path, monkeypatch):
     assert argv_lists[0][:4] == ["/opt/venv/bin/python", "-m", "slashcompute.coordinator.main", "serve"]
     assert argv_lists[1][2:4] == ["slashcompute.agent.main", "start"]
     assert "--url" in argv_lists[1] and "127.0.0.1" in argv_lists[1][argv_lists[1].index("--url") + 1]
-    assert "--no-sandbox" in argv_lists[1]
+    assert "--no-sandbox" not in argv_lists[1]
     assert (tmp_path / "coordinator.pid").read_text().strip() == str(launcher._spawned[0].pid)
     assert snap.last_error == ""
 

@@ -109,7 +109,7 @@ class Launcher:
         self.home.mkdir(parents=True, exist_ok=True)
         self.python = python or sys.executable
         self._popen = popen
-        self._http = http or httpx.Client()
+        self._http = http or httpx.Client(follow_redirects=False)
         self._discover = discover_fn
         self._lan_ip = lan_ip_fn
         self.last_error = ""
@@ -172,7 +172,7 @@ class Launcher:
         argv = [
             self.python, "-m", "slashcompute.agent.main", "start",
             "--url", url, "--gpu-percent", str(int(gpu_percent)),
-            "--no-sandbox", "--home", str(self.home),
+            "--home", str(self.home),
         ]
         if session_token:
             argv.extend(["--session-token", session_token])

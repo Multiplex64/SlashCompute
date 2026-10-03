@@ -29,9 +29,33 @@ from slashcompute.coordinator.recovery import Recovery
 from slashcompute.coordinator.registry import Registry, SendFn
 from slashcompute.coordinator.scheduler import ACTIVE, TERMINAL, WAITING, JobRuntime, Scheduler
 from slashcompute.coordinator.verification import VerificationManager
+from slashcompute.common.config import allowed_model
 from slashcompute.jobs import LoraFinetuneSpec, parse_spec
 
 log = logging.getLogger(__name__)
+
+MAX_DATASET_BYTES = 32 * 1024 * 1024
+
+
+def safe_dataset_source(raw: str, *, max_bytes: int = MAX_DATASET_BYTES) -> Path:
+    """Host path the coordinator may copy into a job. Rejects traversal, links, and non-JSONL."""
+    if not (raw or "").strip():
+        raise ValueError("dataset path is required.")
+    if ".." in raw.replace("\\", "/"):
+        raise ValueError("dataset path is not allowed.")
+    src = Path(raw).expanduser()
+    if src.is_symlink():
+        raise ValueError("dataset path must not be a symlink.")
+    if not src.is_file():
+        raise FileNotFoundError(f"dataset not found on coordinator: {src}")
+    resolved = src.resolve()
+    if resolved.is_symlink() or not resolved.is_file():
+        raise ValueError("dataset path is not allowed.")
+    if resolved.suffix.lower() != ".jsonl":
+        raise ValueError("dataset must be a .jsonl file.")
+    if resolved.stat().st_size > max_bytes:
+        raise ValueError("dataset is too large.")
+    return resolved
 
 
 class Coordinator:
@@ -102,9 +126,9 @@ class Coordinator:
     # ------------------------------------------------------------ jobs
 
     def submit(self, spec: LoraFinetuneSpec) -> JobRuntime:
-        src = Path(spec.dataset_path).expanduser()
-        if not src.is_file():
-            raise FileNotFoundError(f"dataset not found on coordinator: {src}")
+        if not allowed_model(spec.model):
+            raise ValueError(f"model {spec.model!r} is not allowed.")
+        src = safe_dataset_source(spec.dataset_path)
         job_id = uuid.uuid4().hex[:12]
         dest = self.checkpoints.job_dir(job_id) / "dataset.jsonl"
         shutil.copyfile(src, dest)
@@ -230,14 +254,16 @@ class Coordinator:
             return
         self.ledger.record_step(node_id, msg)
         flops = float(msg.usage.flops)
+        job.last_step_flops = flops
         acct = self.credits.job_account(job.id)
+        take = self.credits.consume_job(job.id, flops) if acct is not None else 0.0
         node = self.registry.get(node_id)
         owner_id = (node.user_id if node and node.user_id else self.credits.owner_of(node_id))
-        if owner_id and acct is not None:
+        if owner_id and acct is not None and take > 0:
             owner = self.auth.get(owner_id)
             split = owner.grant_split if owner else 0
-            self.credits.contribute(owner_id, flops, split, node_id=node_id, job_id=msg.job_id)
-        if self.credits.consume_job(job.id, flops):
+            self.credits.contribute(owner_id, take, split, node_id=node_id, job_id=msg.job_id)
+        if acct is not None and self.credits.job_exhausted(job.id):
             await self.cancel_job(job)
             job.row.error = "FLOP budget spent"
             self.db.save(job.row)
@@ -250,6 +276,68 @@ class Coordinator:
                 log.info("job %s step %d/%d loss %.4f", job.id, msg.step, job.spec.steps, msg.loss)
         await self.verification.on_step(job, node_id, msg)
 
+    # ------------------------------------------------------------ waitlist
+
+    def waiting_jobs(self) -> list[JobRuntime]:
+        return sorted(
+            (j for j in self.jobs.values() if j.row.status in WAITING),
+            key=lambda j: j.row.submitted_at,
+        )
+
+    def pool_tflops(self) -> float:
+        return float(sum(n.device.matmul_tflops for n in self.registry.nodes.values()))
+
+    def last_step_flops(self, job: JobRuntime) -> Optional[float]:
+        if job.last_step_flops is not None:
+            return float(job.last_step_flops)
+        recs = [r for r in self.ledger.job_records(job.id) if r.kind == "train"]
+        if not recs:
+            return None
+        job.last_step_flops = float(recs[-1].flops)
+        return job.last_step_flops
+
+    def remaining_flops(self, job: JobRuntime) -> Optional[float]:
+        acct = self.credits.job_account(job.id)
+        if acct is not None:
+            return max(0.0, acct.reserved_flops - acct.spent_flops)
+        last = self.last_step_flops(job)
+        if last is None:
+            return None
+        leftover = max(0, int(job.spec.steps) - int(job.row.progress_step))
+        return leftover * last
+
+    def queue_position(self, job: JobRuntime) -> Optional[int]:
+        if job.row.status not in WAITING:
+            return None
+        for i, other in enumerate(self.waiting_jobs(), 1):
+            if other.id == job.id:
+                return i
+        return None
+
+    def wait_seconds(self, job: JobRuntime) -> Optional[float]:
+        if job.row.status not in WAITING:
+            return None
+        ahead = [
+            other for other in self.jobs.values()
+            if other.id != job.id and (
+                other.row.status in ACTIVE
+                or (other.row.status in WAITING and other.row.submitted_at < job.row.submitted_at)
+            )
+        ]
+        remaining = 0.0
+        for other in ahead:
+            rem = self.remaining_flops(other)
+            if rem is None:
+                return None
+            remaining += rem
+        tflops = self.pool_tflops()
+        if tflops <= 0:
+            return None
+        return remaining / (tflops * 1e12)
+
+    def waitlist(self) -> list[dict]:
+        return [self.job_view(j) for j in self.waiting_jobs()]
+
     # ------------------------------------------------------------ views
 
     def job_view(self, job: JobRuntime) -> dict:
@@ -261,6 +349,8 @@ class Coordinator:
             "epoch": row.epoch, "recoveries": row.recoveries,
             "last_checkpoint_step": row.last_checkpoint_step, "error": row.error,
             "wait_reason": job.wait_reason if row.status in WAITING else None,
+            "queue_position": self.queue_position(job),
+            "wait_s": self.wait_seconds(job),
             "submitted_at": row.submitted_at, "started_at": row.started_at,
             "finished_at": row.finished_at,
             "stages": [

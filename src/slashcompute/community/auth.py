@@ -188,7 +188,8 @@ class Auth:
         return user
 
     def update_profile(self, user: User, name: Optional[str] = None,
-                       grant_split: Optional[int] = None) -> User:
+                       grant_split: Optional[int] = None,
+                       bio: Optional[str] = None) -> User:
         if name is not None:
             name = name.strip()[:80]
             if not name:
@@ -202,6 +203,8 @@ class Auth:
             if split < 0 or split > 100:
                 raise AuthError("grant_split must be 0–100.")
             user.grant_split = split
+        if bio is not None:
+            user.bio = bio.strip()[:280] or None
         self.db.save(user)
         return user
 
@@ -221,4 +224,5 @@ class Auth:
             "admin": user.admin, "banned": user.banned, "flagged": user.flagged,
             "grant_split": user.grant_split,
             "accepted_terms": user.accepted_terms_at is not None,
+            "bio": user.bio or "",
         }

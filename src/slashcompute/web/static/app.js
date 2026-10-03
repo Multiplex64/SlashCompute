@@ -24,13 +24,17 @@ const state = {
   dataset: null,
   modelsShown: "",
   keys: {},
+  user: null,
+  credits: null,
+  authMode: "login",
+  terms: "",
 };
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 
 async function api(path, opts = {}) {
-  const next = { ...opts, headers: { ...(opts.headers || {}) } };
+  const next = { ...opts, credentials: "include", headers: { ...(opts.headers || {}) } };
   if (next.body && !(next.body instanceof FormData) && !next.headers["content-type"]) {
     next.headers["content-type"] = "application/json";
   }
@@ -48,6 +52,8 @@ async function api(path, opts = {}) {
 }
 
 const post = (path, body) => api(path, { method: "POST", body: body === undefined ? undefined : JSON.stringify(body) });
+const patch = (path, body) => api(path, { method: "PATCH", body: JSON.stringify(body) });
+const signedIn = () => !!(state.user && state.user.id);
 
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({
@@ -130,15 +136,33 @@ const pool = () => (state.ov && state.ov.pool) || { online: false, nodes: [], jo
 const me = () => (state.ov && state.ov.me) || { flops: 0 };
 
 function credits() {
+  const split = Number((state.user && state.user.grant_split)
+    ?? (state.settings || {}).grant_split) || 0;
+  if (state.credits) {
+    const earned = Math.max(0, Number(state.credits.lifetime_earned) || 0);
+    const toGrants = earned * split / 100;
+    return {
+      earned, toGrants, kept: earned - toGrants, split,
+      balance: Math.max(0, Number(state.credits.balance) || 0),
+    };
+  }
   const earned = Math.max(0, Number(me().flops) || 0);
-  const split = Number((state.settings || {}).grant_split) || 0;
   const toGrants = earned * split / 100;
-  return { earned, toGrants, kept: earned - toGrants, split };
+  return { earned, toGrants, kept: earned - toGrants, split, balance: 0 };
 }
 
 function grantBalance() {
-  if (!state.grants) return 0;
-  return Math.max(0, credits().toGrants + state.grants.starter - state.grants.pledged);
+  if (state.credits) return Math.max(0, Number(state.credits.balance) || 0);
+  if (state.grants && state.grants.available != null) return Math.max(0, Number(state.grants.available) || 0);
+  return 0;
+}
+
+function fmtWait(s) {
+  if (s == null || !Number.isFinite(Number(s))) return "unknown wait";
+  const n = Number(s);
+  if (n < 60) return `${Math.max(1, Math.round(n))}s`;
+  if (n < 3600) return `${Math.max(1, Math.round(n / 60))} min`;
+  return `${(n / 3600).toFixed(1)} h`;
 }
 
 // ------------------------------------------------------------ settings
@@ -167,10 +191,29 @@ async function poll() {
     trackRate(ov);
     state.ov = ov;
     if (!state.settings || state.saving === 0) state.settings = pickSettings(ov.status);
+    if (ov.status && ov.status.coordinator_up) await loadAuth();
+    else { state.user = null; state.credits = null; }
   } catch (e) {
     state.ov = null;
+    state.user = null;
+    state.credits = null;
   }
   render();
+}
+
+async function loadAuth() {
+  try {
+    const me = await api("/api/coord/auth/me");
+    state.user = (me && me.user) || null;
+    state.credits = (me && me.credits) || null;
+    if (state.user && !state.user.accepted_terms && !state.terms) {
+      const t = await api("/api/coord/auth/terms");
+      state.terms = (t && t.text) || "";
+    }
+  } catch {
+    state.user = null;
+    state.credits = null;
+  }
 }
 
 function trackRate(ov) {
@@ -186,6 +229,7 @@ function trackRate(ov) {
 
 function render() {
   renderSidebar();
+  renderAuth();
   renderContributions();
   renderUsage();
   renderGrantsLive();
@@ -226,6 +270,41 @@ function renderSidebar() {
   agent.textContent = `Contributing · ${(state.settings || {}).gpu_percent ?? 0}%`;
 }
 
+function renderAuth() {
+  const gate = $("#auth-gate");
+  const form = $("#auth-form");
+  const terms = $("#auth-terms");
+  const userBox = $("#auth-user");
+  const online = !!(status().coordinator_up);
+  $("#auth-submit").disabled = !online;
+  if (signedIn() && !state.user.accepted_terms) {
+    gate.hidden = true;
+    form.hidden = true;
+    terms.hidden = false;
+    userBox.hidden = true;
+    if (state.terms) $("#terms-text").textContent = state.terms;
+    return;
+  }
+  if (signedIn()) {
+    gate.hidden = true;
+    form.hidden = true;
+    terms.hidden = true;
+    userBox.hidden = false;
+    setText("#auth-who", state.user.name || state.user.email);
+    setText("#auth-sub", state.user.admin ? "Admin on this pool" : state.user.email);
+    return;
+  }
+  userBox.hidden = true;
+  terms.hidden = true;
+  if (!form.hidden) {
+    gate.hidden = true;
+    $("#auth-submit").textContent = state.authMode === "register" ? "Create account" : "Sign in";
+    $("#auth-name").hidden = state.authMode !== "register";
+  } else {
+    gate.hidden = false;
+  }
+}
+
 // ------------------------------------------------------------ contributions
 
 function sparkline(svg, values) {
@@ -255,9 +334,13 @@ function renderContributions() {
     : "Nothing yet. Start contributing to earn.");
   sparkline($("#c-spark"), state.rates);
   setText("#c-earned", fmtFlops(c.earned));
-  setText("#c-earned-sub", `Estimated · you keep ${withUnit(c.kept)}`);
+  setText("#c-earned-sub", signedIn()
+    ? `On this account · you keep ${withUnit(c.kept)}`
+    : `Estimated · you keep ${withUnit(c.kept)}`);
   setText("#c-grants", fmtFlops(c.toGrants));
-  setText("#c-grants-sub", `Estimated · ${c.split}% of what you earn`);
+  setText("#c-grants-sub", signedIn()
+    ? `${c.split}% of lifetime earnings`
+    : `Estimated · ${c.split}% of what you earn`);
   setText("#c-rank", m.rank ? `#${m.rank}` : "—");
   setText("#c-rank-sub", m.rank ? `of ${plural(m.of, "Mac")} in the pool` : "Not ranked yet");
 
@@ -297,6 +380,9 @@ function renderContributions() {
   setText("#split-keep", `${100 - split.value}%`);
   setText("#split-grants-amt", `≈ ${withUnit(c.toGrants)}`);
   setText("#split-keep-amt", `≈ ${withUnit(c.kept)}`);
+  setText("#split-hint", signedIn()
+    ? "Credits are 1:1 with FLOPs. This split is saved on your account."
+    : "Credits are 1:1 with FLOPs. Sign in so this split is saved on your account.");
 
   const node = m.node;
   renderOnce("mac", [node, m.node_id], $("#c-mac"), () => node ? `
@@ -322,7 +408,10 @@ function renderUsage() {
   setText("#u-mem", fmtBytes(cap.memory_bytes || 0));
   setText("#u-jobs", String(cap.running || 0));
   setText("#u-jobs-sub", `running · ${cap.waiting || 0} waiting`);
-  setText("#u-pill", `≈ ${withUnit(credits().kept)} to spend`);
+  setText("#u-pill", signedIn()
+    ? `${withUnit(credits().balance)} available`
+    : `≈ ${withUnit(credits().kept)} to spend`);
+  $("#flop-budget").hidden = !signedIn();
 
   const models = status().models || [];
   if (models.length && state.modelsShown !== models.join()) {
@@ -356,7 +445,13 @@ function jobCard(j) {
   meta.push(String(j.id).slice(0, 8));
   let note = "";
   if (j.error) note = `<p class="note">${esc(j.error)}</p>`;
-  else if (j.wait_reason) note = `<p class="note">Waiting: ${esc(j.wait_reason)}</p>`;
+  else if (["queued", "recovering"].includes(status) && (j.queue_position != null || j.wait_s != null || j.wait_reason)) {
+    const bits = [];
+    if (j.queue_position != null) bits.push(`queue #${j.queue_position}`);
+    bits.push(j.wait_s == null ? "unknown wait" : `~${fmtWait(j.wait_s)}`);
+    if (j.wait_reason) bits.push(j.wait_reason);
+    note = `<p class="note">Waitlist ${esc(bits.join(" · "))}</p>`;
+  } else if (j.wait_reason) note = `<p class="note">Waiting: ${esc(j.wait_reason)}</p>`;
   else if (j.adapter_dir) note = `<p class="note ok">Adapter ready at ${esc(j.adapter_dir)}</p>`;
   const cancel = j.can_cancel
     ? `<button type="button" class="btn ghost sm" data-cancel="${esc(j.id)}">Cancel</button>` : "";
@@ -388,15 +483,18 @@ async function loadGrants() {
 function renderGrantsLive() {
   const g = state.grants;
   const bal = grantBalance();
-  setText("#g-avail", g ? fmtFlops(bal) : "—");
-  setText("#g-avail-sub", g
-    ? `${withUnit(credits().toGrants)} from your split + ${withUnit(g.starter)} starter`
-    : "");
+  setText("#g-avail", g || signedIn() ? fmtFlops(bal) : "—");
+  setText("#g-avail-sub", signedIn()
+    ? `${withUnit(credits().balance)} personal balance`
+    : "Sign in to fund grants with your credits.");
   setText("#g-pledged", g ? fmtFlops(g.pledged) : "—");
   setText("#g-open", g ? String(g.grants.length) : "—");
   setText("#g-open-sub", g ? `${g.pending.length} waiting for review` : "");
+  setTag("#g-pill", g && g.online ? "Live" : "Offline", g && g.online ? "ok" : "");
 
-  const board = (state.ov && state.ov.leaderboard) || [];
+  const board = (g && g.leaders && g.leaders.length)
+    ? g.leaders
+    : ((state.ov && state.ov.leaderboard) || []);
   const online = pool().online;
   renderOnce("leaders", [board, online], $("#leaders"), () => {
     if (!board.length) {
@@ -413,14 +511,13 @@ function renderGrantsLive() {
 function renderGrants() {
   const g = state.grants;
   $$("#g-sort button").forEach((b) => b.classList.toggle("is-on", b.dataset.sort === state.sort));
-  $("#g-admin").classList.toggle("is-on", state.admin);
-  $("#g-admin").textContent = state.admin ? "Exit admin" : "Admin view";
   if (!g) return;
+  const admin = !!(state.user && state.user.admin);
 
   $("#g-list").innerHTML = g.grants.length ? g.grants.map(grantCard).join("")
-    : `<article class="card"><p class="empty">No public grants yet.</p></article>`;
+    : `<article class="card"><p class="empty">${g.online ? "No public grants yet." : "Start or join a pool to see live grants."}</p></article>`;
 
-  $("#g-review").hidden = !state.admin;
+  $("#g-review").hidden = !admin;
   setTag("#g-review-count", String(g.pending.length), g.pending.length ? "hot" : "");
   $("#g-pending").innerHTML = g.pending.length ? g.pending.map((p) => `<div class="pending">
       <div class="top"><b>${esc(p.title)}</b><span class="muted">${esc(withUnit(p.goal))} goal</span></div>
@@ -599,12 +696,36 @@ const actions = {
     window.setTimeout(() => { btn.textContent = "Copy"; }, 1400);
   },
 
-  "toggle-admin": () => {
-    state.admin = !state.admin;
-    renderGrants();
+  "show-auth": () => {
+    $("#auth-gate").hidden = true;
+    $("#auth-form").hidden = false;
+    $("#auth-email").focus();
+    renderAuth();
   },
 
+  "auth-mode": () => {
+    state.authMode = state.authMode === "register" ? "login" : "register";
+    const btn = document.querySelector("[data-act='auth-mode']");
+    if (btn) btn.textContent = state.authMode === "register" ? "Have an account" : "Create account";
+    renderAuth();
+  },
+
+  "accept-terms": (btn) => withBusy("terms", btn, "Saving…", async () => {
+    await post("/api/coord/auth/accept-terms", {});
+    await loadAuth();
+    toast("Terms accepted.");
+  }),
+
+  logout: (btn) => withBusy("auth", btn, "Signing out…", async () => {
+    await post("/api/coord/auth/logout", {});
+    await saveSettings({ session_token: "" });
+    state.user = null;
+    state.credits = null;
+    toast("Signed out.");
+  }),
+
   "toggle-request": () => {
+    if (!signedIn()) return toast("Sign in to request a grant.", "bad");
     const card = $("#g-request");
     card.hidden = !card.hidden;
     setMsg("#g-msg", "", "");
@@ -672,7 +793,18 @@ $("#split").addEventListener("input", (e) => {
   renderContributions();
   renderGrantsLive();
 });
-$("#split").addEventListener("change", (e) => saveSettings({ grant_split: Number(e.target.value) }));
+$("#split").addEventListener("change", async (e) => {
+  const grant_split = Number(e.target.value);
+  await saveSettings({ grant_split });
+  if (signedIn()) {
+    try {
+      const r = await patch("/api/coord/auth/me", { grant_split });
+      if (r && r.user) state.user = r.user;
+    } catch (err) {
+      toast(err.message, "bad");
+    }
+  }
+});
 
 $("#url").addEventListener("keydown", (e) => {
   if (e.key === "Enter") actions.connect($("#p-connect"));
@@ -698,6 +830,13 @@ $("#job-form").addEventListener("submit", (e) => {
   body.append("model", $("#model").value);
   body.append("steps", String(steps));
   body.append("min_stages", String(minStages));
+  if (signedIn()) {
+    const tflops = Number($("#max_flops").value);
+    if (!Number.isFinite(tflops) || tflops <= 0) {
+      return setMsg("#job-msg", "Set a FLOP budget above zero.", "bad");
+    }
+    body.append("max_flops", String(tflops * T));
+  }
   setMsg("#job-msg", `Uploading ${state.dataset.name}…`, "");
   msg.dataset.sticky = "1";
   return withBusy("submit", $("#job-submit"), "Uploading…", async () => {
@@ -724,6 +863,33 @@ $("#grant-form").addEventListener("submit", async (e) => {
   $("#g-title").value = "";
   $("#g-summary").value = "";
   $("#g-request").hidden = true;
+});
+
+$("#auth-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const email = $("#auth-email").value.trim();
+  const password = $("#auth-password").value;
+  const name = $("#auth-name").value.trim();
+  if (!email || !password) return setMsg("#auth-msg", "Email and password are required.", "bad");
+  if (state.authMode === "register" && !name) return setMsg("#auth-msg", "Give the account a name.", "bad");
+  return withBusy("auth", $("#auth-submit"), "Working…", async () => {
+    const path = state.authMode === "register" ? "/api/coord/auth/register" : "/api/coord/auth/login";
+    const body = { email, password };
+    if (state.authMode === "register") body.name = name;
+    const r = await post(path, body);
+    if (r.token) await saveSettings({ session_token: r.token });
+    state.user = r.user || null;
+    await loadAuth();
+    if (state.user && !state.user.accepted_terms) {
+      try {
+        const t = await api("/api/coord/auth/terms");
+        state.terms = (t && t.text) || "";
+      } catch { state.terms = ""; }
+    }
+    setMsg("#auth-msg", "", "");
+    toast(state.authMode === "register" ? "Account created." : "Signed in.");
+    loadGrants();
+  });
 });
 
 poll();

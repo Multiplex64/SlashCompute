@@ -21,6 +21,7 @@ dependencies = [
 ]
 
 [project.scripts]
+slashcompute = "slashcompute.launcher.main:main"
 slashcompute-agent = "slashcompute.agent.main:app"
 slashcompute-coordinator = "slashcompute.coordinator.main:app"
 

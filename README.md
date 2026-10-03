@@ -13,6 +13,18 @@ cd slashcompute
 uv sync --group dev
 ```
 
+## Quick start
+
+Open the desktop window. Pick **Host pool** on one Mac and **Join pool** on the others.
+
+```bash
+uv run slashcompute
+```
+
+Host shows this Mac’s LAN IP. Join can type that address or press **Find on LAN**. Start/Stop spawn the same coordinator and agent the CLI uses. Closing the window leaves them running.
+
+The rest of this README is the terminal equivalent.
+
 ## Same Mac (two fake nodes)
 
 No second machine needed. Starts a coordinator and two agents on localhost:

@@ -23,7 +23,7 @@ class DeviceProfile(BaseModel):
 
 
 class UsageSample(BaseModel):
-    """Raw per-step measurements for one stage. Credits are derived later."""
+    """Raw per-step measurements for one stage. Credits post from these when a job is reserved."""
 
     flops: float
     tokens: int
@@ -51,6 +51,7 @@ class Register(BaseModel):
     data_host: str
     data_port: int
     gpu_percent: int
+    session_token: Optional[str] = None
 
 
 class Heartbeat(BaseModel):

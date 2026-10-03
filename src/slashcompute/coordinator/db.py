@@ -108,11 +108,99 @@ class Checkpoint(SQLModel, table=True):
     created_at: float = Field(default_factory=now)
 
 
+class User(SQLModel, table=True):
+    __tablename__ = "users"
+    id: str = Field(primary_key=True)
+    email: str = Field(index=True, unique=True)
+    password_hash: str
+    name: str
+    admin: bool = False
+    banned: bool = False
+    flagged: bool = False
+    grant_split: int = 0
+    google_sub: Optional[str] = Field(default=None, index=True)
+    accepted_terms_at: Optional[float] = None
+    created_at: float = Field(default_factory=now)
+
+
+class SessionRow(SQLModel, table=True):
+    __tablename__ = "sessions"
+    token_hash: str = Field(primary_key=True)
+    user_id: str = Field(index=True)
+    created_at: float = Field(default_factory=now)
+    expires_at: float
+
+
+class CreditTxn(SQLModel, table=True):
+    __tablename__ = "credit_txns"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: str = Field(index=True)
+    kind: str
+    amount: float
+    job_id: Optional[str] = Field(default=None, index=True)
+    grant_id: Optional[str] = None
+    node_id: Optional[str] = None
+    note: Optional[str] = None
+    created_at: float = Field(default_factory=now)
+
+
+class NodeOwner(SQLModel, table=True):
+    __tablename__ = "node_owners"
+    node_id: str = Field(primary_key=True)
+    user_id: str = Field(index=True)
+
+
+class JobAccount(SQLModel, table=True):
+    __tablename__ = "job_accounts"
+    job_id: str = Field(primary_key=True)
+    user_id: str = Field(index=True)
+    reserved_flops: float = 0.0
+    spent_flops: float = 0.0
+
+
+class Grant(SQLModel, table=True):
+    __tablename__ = "grants"
+    id: str = Field(primary_key=True)
+    author_id: str = Field(index=True)
+    title: str
+    body: str
+    goal_flops: float
+    received_flops: float = 0.0
+    status: str = "pending"
+    created_at: float = Field(default_factory=now)
+
+
+class GrantComment(SQLModel, table=True):
+    __tablename__ = "grant_comments"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    grant_id: str = Field(index=True)
+    user_id: str
+    body: str
+    created_at: float = Field(default_factory=now)
+
+
+class UserFlag(SQLModel, table=True):
+    __tablename__ = "user_flags"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: str = Field(index=True)
+    admin_id: str
+    reason: str
+    created_at: float = Field(default_factory=now)
+
+
 class Database:
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.engine = create_engine(f"sqlite:///{path}", connect_args={"check_same_thread": False})
         SQLModel.metadata.create_all(self.engine)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        with self.engine.connect() as conn:
+            cols = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(users)").fetchall()}
+            if "google_sub" not in cols:
+                conn.exec_driver_sql("ALTER TABLE users ADD COLUMN google_sub VARCHAR")
+                conn.commit()
 
     def session(self) -> Session:
         return Session(self.engine, expire_on_commit=False)

@@ -19,6 +19,9 @@ from slashcompute.common.protocol import (
     CancelStage, DrainNotice, Heartbeat, Register, StageFinished, StageReady, StepMetrics,
     VerifyBundleReady, VerifyResult, Welcome,
 )
+from slashcompute.community.auth import Auth
+from slashcompute.community.credits import Credits
+from slashcompute.community.grants import Grants
 from slashcompute.coordinator.checkpoints import CheckpointStore
 from slashcompute.coordinator.db import Checkpoint, Database, Job, Node, now
 from slashcompute.coordinator.ledger import Ledger
@@ -38,6 +41,9 @@ class Coordinator:
         self.db = Database(cfg.coordinator_dir / "coordinator.db")
         self.registry = Registry()
         self.ledger = Ledger(self.db)
+        self.auth = Auth(self.db)
+        self.credits = Credits(self.db)
+        self.grants = Grants(self.db, self.credits)
         self.checkpoints = CheckpointStore(cfg.coordinator_dir / "jobs")
         self.scheduler = Scheduler(self)
         self.recovery = Recovery(self)
@@ -109,6 +115,12 @@ class Coordinator:
         log.info("job %s submitted: %s steps=%d", job_id, spec.model, spec.steps)
         return job
 
+    def abandon_job(self, job: JobRuntime, reason: str) -> None:
+        """Drop a job that never reserved credits (failed Take)."""
+        job.row.status, job.row.error, job.row.finished_at = "cancelled", reason, now()
+        self.db.save(job.row)
+        self.jobs.pop(job.id, None)
+
     def dataset_path(self, job_id: str) -> Path:
         return self.checkpoints.job_dir(job_id) / "dataset.jsonl"
 
@@ -125,11 +137,13 @@ class Coordinator:
                 await self.send(p.node_id, CancelStage(job_id=job.id, epoch=cur.epoch))
         job.row.status, job.row.finished_at = "cancelled", now()
         self.db.save(job.row)
+        self.credits.settle_job(job.id)
 
     async def fail_job(self, job: JobRuntime, reason: str) -> None:
         log.error("job %s failed: %s", job.id, reason)
         job.row.status, job.row.error, job.row.finished_at = "failed", reason, now()
         self.db.save(job.row)
+        self.credits.settle_job(job.id)
 
     async def complete_job(self, job: JobRuntime) -> None:
         row = job.row
@@ -140,6 +154,7 @@ class Coordinator:
             row.error = f"adapter export failed: {e}"
         row.status, row.finished_at = "completed", now()
         self.db.save(row)
+        self.credits.settle_job(job.id)
         log.info("job %s completed (%d steps, last loss %s)", job.id, row.progress_step, row.last_loss)
 
     def on_checkpoint_upload(self, job_id: str, epoch: int, stage_idx: int, step: int,
@@ -159,7 +174,20 @@ class Coordinator:
         old = self.registry.get(msg.node_id)
         if old is not None:
             await self.recovery.on_node_lost(msg.node_id, "re-registered")
-        self.registry.register(msg, send)
+        state = self.registry.register(msg, send)
+        if msg.session_token:
+            user = self.auth.session_user(msg.session_token)
+            if user is None:
+                log.warning("node %s presented a bad session token", msg.node_id[:8])
+            elif user.banned:
+                self.registry.remove(msg.node_id)
+                raise PermissionError("banned")
+            elif user.accepted_terms_at is None:
+                log.warning("node %s session has not accepted terms — compute only",
+                            msg.node_id[:8])
+            else:
+                state.user_id = user.id
+                self.credits.bind_node(msg.node_id, user.id)
         d = msg.device
         row = self.db.get(Node, msg.node_id) or Node(
             id=msg.node_id, name=msg.name, chip=d.chip, memory_contrib_bytes=d.memory_contrib_bytes,
@@ -201,6 +229,19 @@ class Coordinator:
         if job is None or job.current is None or job.current.epoch != msg.epoch:
             return
         self.ledger.record_step(node_id, msg)
+        flops = float(msg.usage.flops)
+        acct = self.credits.job_account(job.id)
+        node = self.registry.get(node_id)
+        owner_id = (node.user_id if node and node.user_id else self.credits.owner_of(node_id))
+        if owner_id and acct is not None:
+            owner = self.auth.get(owner_id)
+            split = owner.grant_split if owner else 0
+            self.credits.contribute(owner_id, flops, split, node_id=node_id, job_id=msg.job_id)
+        if self.credits.consume_job(job.id, flops):
+            await self.cancel_job(job)
+            job.row.error = "FLOP budget spent"
+            self.db.save(job.row)
+            return
         if msg.loss is not None:
             job.row.progress_step = msg.step
             job.row.last_loss = msg.loss
@@ -230,7 +271,15 @@ class Coordinator:
             ] if cur and not cur.closed else [],
             "adapter_dir": str(self.checkpoints.job_dir(row.id) / "adapter")
             if row.status == "completed" else None,
+            **self._job_account_view(job.id),
         }
+
+    def _job_account_view(self, job_id: str) -> dict:
+        acct = self.credits.job_account(job_id)
+        if acct is None:
+            return {"user_id": None, "reserved_flops": None, "spent_flops": None}
+        return {"user_id": acct.user_id, "reserved_flops": acct.reserved_flops,
+                "spent_flops": acct.spent_flops}
 
     def node_view(self) -> list[dict]:
         out = []
@@ -242,5 +291,6 @@ class Coordinator:
                 "status": n.status, "draining": n.draining, "canary_passed": n.canary_passed,
                 "assignment": n.assignment.__dict__ if n.assignment else None,
                 "data_addr": f"{n.data_host}:{n.data_port}",
+                "user_id": n.user_id,
             })
         return out

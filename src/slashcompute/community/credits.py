@@ -1,0 +1,166 @@
+"""1:1 FLOP credits. Earn what you compute; spend what you take."""
+
+from __future__ import annotations
+
+from typing import Optional
+
+from sqlalchemy import func
+from sqlmodel import select
+
+from slashcompute.coordinator.db import CreditTxn, Database, JobAccount, NodeOwner, User
+
+POT_ID = "__pot__"
+BALANCE_KINDS = ("earn", "reserve", "release", "donate", "receive", "allocate")
+
+
+class CreditError(Exception):
+    def __init__(self, message: str, status: int = 400) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+class Credits:
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    def post(self, user_id: str, kind: str, amount: float, *, job_id: Optional[str] = None,
+             grant_id: Optional[str] = None, node_id: Optional[str] = None,
+             note: Optional[str] = None) -> CreditTxn:
+        row = CreditTxn(user_id=user_id, kind=kind, amount=float(amount), job_id=job_id,
+                        grant_id=grant_id, node_id=node_id, note=note)
+        self.db.add(row)
+        return row
+
+    def balance(self, user_id: str) -> float:
+        with self.db.session() as s:
+            total = s.exec(
+                select(func.coalesce(func.sum(CreditTxn.amount), 0.0)).where(
+                    CreditTxn.user_id == user_id, CreditTxn.kind.in_(BALANCE_KINDS),
+                )
+            ).one()
+        return float(total or 0.0)
+
+    def lifetime_earned(self, user_id: str) -> float:
+        with self.db.session() as s:
+            total = s.exec(
+                select(func.coalesce(func.sum(CreditTxn.amount), 0.0)).where(
+                    CreditTxn.user_id == user_id, CreditTxn.kind == "generated",
+                )
+            ).one()
+        return float(total or 0.0)
+
+    def lifetime_spent(self, user_id: str) -> float:
+        with self.db.session() as s:
+            total = s.exec(
+                select(func.coalesce(func.sum(CreditTxn.amount), 0.0)).where(
+                    CreditTxn.user_id == user_id, CreditTxn.kind == "consumed",
+                )
+            ).one()
+        return float(total or 0.0)
+
+    def summary(self, user_id: str) -> dict:
+        return {
+            "user_id": user_id,
+            "balance": self.balance(user_id),
+            "lifetime_earned": self.lifetime_earned(user_id),
+            "lifetime_spent": self.lifetime_spent(user_id),
+            "pot": self.balance(POT_ID),
+        }
+
+    def bind_node(self, node_id: str, user_id: str) -> None:
+        self.db.save(NodeOwner(node_id=node_id, user_id=user_id))
+
+    def owner_of(self, node_id: str) -> Optional[str]:
+        row = self.db.get(NodeOwner, node_id)
+        return row.user_id if row else None
+
+    def contribute(self, user_id: str, flops: float, grant_split: int, *,
+                   node_id: Optional[str] = None, job_id: Optional[str] = None) -> None:
+        if flops <= 0:
+            return
+        split = max(0, min(100, int(grant_split))) / 100.0
+        pot = flops * split
+        personal = flops - pot
+        self.post(user_id, "generated", flops, node_id=node_id, job_id=job_id)
+        if personal:
+            self.post(user_id, "earn", personal, node_id=node_id, job_id=job_id)
+        if pot:
+            self.post(POT_ID, "earn", pot, node_id=node_id, job_id=job_id,
+                      note=f"tithe from {user_id}")
+
+    def reserve_job(self, user_id: str, job_id: str, flops: float) -> JobAccount:
+        if flops <= 0:
+            raise CreditError("Set a FLOP budget greater than zero.")
+        if self.balance(user_id) < flops:
+            raise CreditError(
+                f"Need {flops:.3e} FLOPs; you have {self.balance(user_id):.3e}. Contribute first.",
+            )
+        self.post(user_id, "reserve", -flops, job_id=job_id)
+        acct = JobAccount(job_id=job_id, user_id=user_id, reserved_flops=flops, spent_flops=0.0)
+        self.db.add(acct)
+        return acct
+
+    def job_account(self, job_id: str) -> Optional[JobAccount]:
+        return self.db.get(JobAccount, job_id)
+
+    def consume_job(self, job_id: str, flops: float) -> bool:
+        """Charge a job's reserve. Returns True if the budget is exhausted."""
+        acct = self.job_account(job_id)
+        if acct is None or flops <= 0:
+            return False
+        remaining = acct.reserved_flops - acct.spent_flops
+        take = min(flops, remaining)
+        if take:
+            acct.spent_flops += take
+            self.db.save(acct)
+            self.post(acct.user_id, "consumed", take, job_id=job_id)
+        return acct.spent_flops >= acct.reserved_flops - 1e-9
+
+    def settle_job(self, job_id: str) -> None:
+        acct = self.job_account(job_id)
+        if acct is None:
+            return
+        leftover = max(0.0, acct.reserved_flops - acct.spent_flops)
+        if leftover:
+            self.post(acct.user_id, "release", leftover, job_id=job_id)
+            acct.reserved_flops = acct.spent_flops
+            self.db.save(acct)
+
+    def donate(self, donor_id: str, recipient_id: str, grant_id: str, flops: float) -> None:
+        if flops <= 0:
+            raise CreditError("Donation must be positive.")
+        if self.balance(donor_id) < flops:
+            raise CreditError("Not enough personal credits to donate.")
+        self.post(donor_id, "donate", -flops, grant_id=grant_id)
+        self.post(recipient_id, "receive", flops, grant_id=grant_id)
+
+    def allocate_pot(self, recipient_id: str, grant_id: str, flops: float) -> None:
+        if flops <= 0:
+            raise CreditError("Allocation must be positive.")
+        if self.balance(POT_ID) < flops:
+            raise CreditError("Community pot does not have that many FLOPs.")
+        self.post(POT_ID, "allocate", -flops, grant_id=grant_id)
+        self.post(recipient_id, "receive", flops, grant_id=grant_id)
+
+    def leaderboard(self, limit: int = 20) -> list[dict]:
+        with self.db.session() as s:
+            rows = s.exec(
+                select(CreditTxn.user_id, func.sum(CreditTxn.amount)).where(
+                    CreditTxn.kind == "generated",
+                ).group_by(CreditTxn.user_id)
+            ).all()
+            users = {u.id: u for u in s.exec(select(User)).all()}
+        ranked = sorted(
+            ((uid, float(total or 0.0)) for uid, total in rows if uid != POT_ID),
+            key=lambda x: x[1], reverse=True,
+        )[:limit]
+        out = []
+        for uid, earned in ranked:
+            u = users.get(uid)
+            out.append({
+                "user_id": uid,
+                "name": u.name if u else uid[:8],
+                "lifetime_earned": earned,
+                "balance": self.balance(uid),
+            })
+        return out

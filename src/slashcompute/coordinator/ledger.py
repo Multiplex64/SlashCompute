@@ -1,4 +1,4 @@
-"""Raw usage ledger. Stores per-step measurements; credits are derived later."""
+"""Raw usage ledger. Stores per-step measurements; the credit book posts from them."""
 
 from __future__ import annotations
 

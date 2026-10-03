@@ -65,6 +65,7 @@ class AgentOptions:
         localhost: bool = False,
         sandbox: Optional[bool] = None,
         name: Optional[str] = None,
+        session_token: Optional[str] = None,
     ) -> None:
         self.cfg = EngineConfig.from_env(home=home)
         if home is not None:
@@ -81,6 +82,7 @@ class AgentOptions:
         self.node_id = self.paths.node_id()
         self.data_host = resolve_data_host(localhost)
         self.data_bind = "0.0.0.0"
+        self.session_token = session_token or __import__("os").environ.get("SLASHCOMPUTE_SESSION")
 
 
 class Daemon:
@@ -135,6 +137,7 @@ class Daemon:
                 await self.send(Register(
                     node_id=opt.node_id, name=opt.name, device=device,
                     data_host=opt.data_host, data_port=opt.data_port, gpu_percent=opt.gpu_percent,
+                    session_token=opt.session_token,
                 ))
                 welcome = parse_coordinator_message(await ws.recv())
                 if not isinstance(welcome, Welcome):

@@ -99,6 +99,9 @@ def test_coordinator_and_agent_argv(tmp_path):
         "--url", "http://192.168.1.20:8765", "--gpu-percent", "40",
         "--no-sandbox", "--home", str(tmp_path),
     ]
+    assert "--session-token" in launcher.agent_argv(
+        "http://192.168.1.20:8765", 40, session_token="tok",
+    )
 
 
 def test_host_url_uses_lan_ip(tmp_path):
@@ -128,6 +131,7 @@ def test_start_host_spawns_coordinator_and_agent(tmp_path, monkeypatch):
     argv_lists = [p.argv for p in launcher._spawned]  # type: ignore[attr-defined]
     assert argv_lists[0][:4] == ["/opt/venv/bin/python", "-m", "slashcompute.coordinator.main", "serve"]
     assert argv_lists[1][2:4] == ["slashcompute.agent.main", "start"]
+    assert "--url" in argv_lists[1] and "127.0.0.1" in argv_lists[1][argv_lists[1].index("--url") + 1]
     assert "--no-sandbox" in argv_lists[1]
     assert (tmp_path / "coordinator.pid").read_text().strip() == str(launcher._spawned[0].pid)
     assert snap.last_error == ""
@@ -140,6 +144,30 @@ def test_start_host_without_contribute_skips_agent(tmp_path):
     launcher.start(LauncherSettings(mode="host", contribute=False))
     kinds = [p.argv[2] for p in launcher._spawned]  # type: ignore[attr-defined]
     assert kinds == ["slashcompute.coordinator.main"]
+
+
+def test_start_rebinds_agent_when_session_changes(tmp_path, monkeypatch):
+    http = FakeHTTP({"ok": True, "nodes": 0, "jobs": 0})
+    launcher = _launcher(tmp_path, http=http)
+    (tmp_path / "agent" / "agent.pid").write_text("77\n")
+    (tmp_path / "agent.session").write_text("old\n")
+    running = {77: True}
+
+    def alive(pid: int) -> bool:
+        return running.get(pid, False)
+
+    def stop(paths):
+        running[77] = False
+        paths.clear_pid()
+        return True
+
+    monkeypatch.setattr("slashcompute.launcher.controller.process_alive", alive)
+    monkeypatch.setattr("slashcompute.launcher.controller.request_stop", stop)
+    launcher.start(LauncherSettings(mode="host", contribute=True, session_token="newtok"))
+    spawned = launcher._spawned  # type: ignore[attr-defined]
+    assert len(spawned) == 1
+    assert spawned[0].argv[-2:] == ["--session-token", "newtok"]
+    assert (tmp_path / "agent.session").read_text() == "newtok"
 
 
 def test_start_when_already_up_is_noop(tmp_path, monkeypatch):

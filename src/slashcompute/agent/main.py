@@ -31,6 +31,7 @@ def start(
     no_sandbox: bool = typer.Option(False, help="Disable the macOS sandbox"),
     name: Optional[str] = typer.Option(None, help="Display name (default: hostname)"),
     home: Optional[Path] = typer.Option(None, help="State directory (default ~/.slashcompute)"),
+    session_token: Optional[str] = typer.Option(None, help="Account session so this node earns credits"),
 ):
     """Join the pool and wait for stage assignments. Runs in the foreground."""
     setup_logging("agent")
@@ -38,6 +39,7 @@ def start(
     opt = AgentOptions(
         url=url, home=home, gpu_percent=gpu_percent, data_port=data_port,
         max_memory_gb=max_memory_gb, localhost=localhost, sandbox=use_sandbox, name=name,
+        session_token=session_token,
     )
     paths = opt.paths
     existing = paths.read_pid()

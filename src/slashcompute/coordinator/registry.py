@@ -37,6 +37,7 @@ class NodeState:
     verifying: Optional[str] = None  # verification id
     canary_passed: Optional[bool] = None
     last_canary: float = 0.0
+    user_id: Optional[str] = None
 
     @property
     def peer(self) -> PeerAddr:

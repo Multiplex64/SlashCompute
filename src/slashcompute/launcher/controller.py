@@ -24,22 +24,34 @@ class LauncherError(Exception):
     """User-facing start/stop failure."""
 
 
+FINISHES = ("carbon", "poster", "signal", "thermal", "void")
+
+
 @dataclass
 class LauncherSettings:
     mode: str = "host"
     url: str = ""
     gpu_percent: int = 50
     contribute: bool = True
+    finish: str = "carbon"
+    session_token: str = ""
+    grant_split: int = 0
 
     def clamp(self) -> "LauncherSettings":
         mode = self.mode if self.mode in ("host", "join") else "host"
+        finish = self.finish if self.finish in FINISHES else "carbon"
         try:
             gpu = max(1, min(100, int(self.gpu_percent)))
         except (TypeError, ValueError):
             gpu = 50
+        try:
+            split = max(0, min(100, int(self.grant_split)))
+        except (TypeError, ValueError):
+            split = 0
         return LauncherSettings(
             mode=mode, url=str(self.url or ""), gpu_percent=gpu,
-            contribute=bool(self.contribute),
+            contribute=bool(self.contribute), finish=finish,
+            session_token=str(self.session_token or ""), grant_split=split,
         )
 
 
@@ -130,6 +142,9 @@ class Launcher:
             url=raw.get("url", ""),
             gpu_percent=raw.get("gpu_percent", 50),
             contribute=raw.get("contribute", True),
+            finish=raw.get("finish", "carbon"),
+            session_token=raw.get("session_token", ""),
+            grant_split=raw.get("grant_split", 0),
         ).clamp()
 
     def save_settings(self, settings: LauncherSettings) -> None:
@@ -141,16 +156,26 @@ class Launcher:
             return f"http://{self._lan_ip()}:{self.cfg.coordinator_port}"
         return normalize_url(settings.url, self.cfg.coordinator_port)
 
+    def proxy_url(self, settings: Optional[LauncherSettings] = None) -> str:
+        """Coordinator URL the local shell should dial (loopback when hosting)."""
+        s = settings.clamp() if settings is not None else self.load_settings()
+        if s.mode == "host":
+            return f"http://127.0.0.1:{self.cfg.coordinator_port}"
+        return self.coordinator_url(s)
+
     def coordinator_argv(self) -> list[str]:
         return [self.python, "-m", "slashcompute.coordinator.main", "serve",
                 "--home", str(self.home)]
 
-    def agent_argv(self, url: str, gpu_percent: int) -> list[str]:
-        return [
+    def agent_argv(self, url: str, gpu_percent: int, session_token: str = "") -> list[str]:
+        argv = [
             self.python, "-m", "slashcompute.agent.main", "start",
             "--url", url, "--gpu-percent", str(int(gpu_percent)),
             "--no-sandbox", "--home", str(self.home),
         ]
+        if session_token:
+            argv.extend(["--session-token", session_token])
+        return argv
 
     def read_coordinator_pid(self) -> Optional[int]:
         if not self.coordinator_pid_path.exists():
@@ -206,19 +231,35 @@ class Launcher:
         if want_coord and not self.poll_health(url):
             self._spawn(self.coordinator_argv(), self.log_dir / "coordinator.log",
                         pid_writer=self.write_coordinator_pid)
-            if not self.wait_health(url):
+            check = self.proxy_url(s) if s.mode == "host" else url
+            if not (self.wait_health(check) or self.poll_health(url)):
                 self.last_error = (
                     f"Coordinator started but is not answering {url}/health yet. "
-                    "Watch ~/.slashcompute/logs/coordinator.log."
+                    f"Watch {self.log_dir / 'coordinator.log'}."
                 )
 
-        if want_agent and not self._agent_running():
-            if not self.poll_health(url) and s.mode == "join":
+        agent_url = self.proxy_url(s) if s.mode == "host" else url
+        if want_agent:
+            if s.mode == "join" and not self.poll_health(url):
                 self.last_error = f"No coordinator at {url}."
                 raise LauncherError(self.last_error)
-            self._spawn(self.agent_argv(url, s.gpu_percent), self.log_dir / "agent.log")
+            bound = self._bound_session()
+            rebind = bool(s.session_token) and s.session_token != bound
+            if self._agent_running() and rebind:
+                request_stop(self.paths)
+                deadline = time.monotonic() + 3.0
+                while time.monotonic() < deadline and self._agent_running():
+                    time.sleep(0.05)
+            if not self._agent_running():
+                self._spawn(self.agent_argv(agent_url, s.gpu_percent, s.session_token),
+                            self.log_dir / "agent.log")
+                self._write_bound_session(s.session_token)
 
-        return self.snapshot(s)
+        snap = self.snapshot(s)
+        if snap.coordinator_up and "not answering" in (self.last_error or ""):
+            self.last_error = ""
+            snap.last_error = ""
+        return snap
 
     def stop(self) -> StatusSnapshot:
         self.last_error = ""
@@ -235,6 +276,8 @@ class Launcher:
         s = settings.clamp() if settings is not None else self.load_settings()
         url = self.coordinator_url(s)
         health = self.poll_health(url) or {}
+        if not health and s.mode == "host":
+            health = self.poll_health(self.proxy_url(s)) or {}
         agent = self.paths.read_status()
         agent_pid = self.paths.read_pid()
         agent_running = bool(agent_pid and process_alive(agent_pid))
@@ -253,6 +296,18 @@ class Launcher:
             lan_ip=self._lan_ip(),
             last_error=self.last_error,
         )
+
+    def _agent_session_path(self) -> Path:
+        return self.home / "agent.session"
+
+    def _bound_session(self) -> str:
+        try:
+            return self._agent_session_path().read_text().strip()
+        except OSError:
+            return ""
+
+    def _write_bound_session(self, token: str) -> None:
+        self._agent_session_path().write_text(token or "")
 
     def _agent_running(self) -> bool:
         pid = self.paths.read_pid()

@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from pydantic import ValidationError
 from sqlmodel import select
 
+from slashcompute.community.credits import CreditError
+from slashcompute.community.http import _token, mount_community
 from slashcompute.common.config import EngineConfig
 from slashcompute.common.protocol import Register, dump, parse_agent_message
 from slashcompute.coordinator.core import Coordinator
@@ -43,6 +46,44 @@ def create_app(cfg: EngineConfig, advertise: bool = False) -> FastAPI:
     app = FastAPI(title="/compute coordinator", lifespan=lifespan)
     app.state.core = core
 
+    @app.middleware("http")
+    async def session_cookie(request: Request, call_next):
+        response = await call_next(request)
+        token = getattr(request.state, "session_token", None)
+        if token:
+            response.set_cookie("slashcompute_session", token, httponly=True, samesite="lax")
+        if request.url.path.rstrip("/").endswith("/auth/logout"):
+            response.delete_cookie("slashcompute_session")
+        return response
+
+    mount_community(app, core)
+
+    def _user(request: Request, authorization: Optional[str] = None):
+        user = core.auth.session_user(_token(request, authorization))
+        if user is not None and user.banned:
+            raise HTTPException(403, "This account is banned.")
+        return user
+
+    def _reserve(user, job, max_flops: Optional[float]):
+        if user is None:
+            return
+        def fail(status: int, msg: str):
+            core.abandon_job(job, msg)
+            raise HTTPException(status, msg)
+        if user.accepted_terms_at is None:
+            fail(403, "Accept the terms before taking from the pool.")
+        if max_flops is None:
+            fail(400, "Set a FLOP budget (max_flops) to take.")
+        try:
+            budget = float(max_flops)
+        except (TypeError, ValueError):
+            fail(400, "max_flops must be a number.")
+        try:
+            core.credits.reserve_job(user.id, job.id, budget)
+        except CreditError as e:
+            core.abandon_job(job, str(e))
+            raise HTTPException(e.status, str(e)) from e
+
     # ------------------------------------------------------------ agents
 
     @app.websocket("/ws/agent")
@@ -61,7 +102,11 @@ def create_app(cfg: EngineConfig, advertise: bool = False) -> FastAPI:
                 await ws.close(code=4000, reason="first message must be register")
                 return
             node_id = first.node_id
-            await core.on_register(first, send)
+            try:
+                await core.on_register(first, send)
+            except PermissionError:
+                await ws.close(code=4003, reason="banned")
+                return
             while True:
                 raw = await ws.receive_text()
                 try:
@@ -88,12 +133,45 @@ def create_app(cfg: EngineConfig, advertise: bool = False) -> FastAPI:
         return job
 
     @app.post("/jobs")
-    async def submit_job(body: dict):
+    async def submit_job(body: dict, request: Request,
+                         authorization: Optional[str] = Header(default=None)):
+        user = _user(request, authorization)
         try:
             spec = parse_spec(body)
             job = core.submit(spec)
         except (ValidationError, ValueError, FileNotFoundError) as e:
             raise HTTPException(400, str(e))
+        _reserve(user, job, body.get("max_flops"))
+        return core.job_view(job)
+
+    @app.post("/jobs/upload")
+    async def upload_job(
+        request: Request,
+        dataset: UploadFile = File(...),
+        model: str = Form("mlx-community/Qwen2.5-0.5B-Instruct-4bit"),
+        steps: int = Form(10),
+        min_stages: int = Form(2),
+        batch_size: int = Form(4),
+        microbatches: int = Form(2),
+        max_flops: Optional[float] = Form(None),
+        authorization: Optional[str] = Header(default=None),
+    ):
+        uploads = cfg.home / "uploads"
+        uploads.mkdir(parents=True, exist_ok=True)
+        raw = (dataset.filename or "train.jsonl").replace("\\", "/").split("/")[-1]
+        dest = uploads / f"{uuid.uuid4().hex}_{raw}"
+        dest.write_bytes(await dataset.read())
+        user = _user(request, authorization)
+        try:
+            spec = parse_spec({
+                "kind": "lora_finetune", "model": model, "dataset_path": str(dest),
+                "steps": steps, "min_stages": min_stages,
+                "batch_size": batch_size, "microbatches": microbatches,
+            })
+            job = core.submit(spec)
+        except (ValidationError, ValueError, FileNotFoundError) as e:
+            raise HTTPException(400, str(e))
+        _reserve(user, job, max_flops)
         return core.job_view(job)
 
     @app.get("/jobs")

@@ -230,3 +230,17 @@ def test_drain_sends_drain_to_stage0_and_resumes(env):
                 x.close()
             except Exception:
                 pass
+
+
+def test_job_upload_accepts_dataset_file(env):
+    client, core, tiny_model, tiny_dataset, _ = env
+    r = client.post(
+        "/jobs/upload",
+        files={"dataset": ("train.jsonl", tiny_dataset.read_bytes(), "application/jsonl")},
+        data={"model": str(tiny_model), "steps": 2, "min_stages": 1,
+              "batch_size": 2, "microbatches": 1},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["kind"] == "lora_finetune"
+    assert body["id"] in core.jobs

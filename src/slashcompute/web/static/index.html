@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en" data-ink="carbon">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>/compute</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <!--
+    THESIS: /compute is a light table — stone, code, and hard-stop ink share one field. Not a poster beside a generic editor.
+    OWN-WORLD: Archivo Black title; Martian Mono everywhere else; carbon/paper structure; ink only as hard stops; square chrome except two circles.
+    STORY: Host or join a pool, lend GPU time, submit a LoRA, read FLOPs.
+    FIRST VIEWPORT: stacked / COMPUTE, ringed column on the field, code slab as the product, circular file badges, five-finish rail.
+    FORM: Dark Brutalism specimen field, user-pinned.
+    FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review.
+  -->
+  <div class="grain" aria-hidden="true"></div>
+  <div class="wipe" id="wipe" hidden></div>
+
+  <div class="table">
+    <div class="stage">
+      <section class="field-col">
+        <h1 class="title"><span>/</span><span>COMPUTE</span></h1>
+        <figure class="mass" aria-hidden="true">
+          <svg class="column" viewBox="0 0 320 420" role="img">
+            <title>Synthetic ringed column (not a photograph)</title>
+            <rect class="plinth-a" x="48" y="348" width="32" height="32"/>
+            <rect class="plinth-b" x="80" y="348" width="32" height="32"/>
+            <rect class="plinth-b" x="112" y="348" width="32" height="32"/>
+            <rect class="plinth-a" x="144" y="348" width="32" height="32"/>
+            <rect class="plinth-b" x="176" y="348" width="32" height="32"/>
+            <rect class="plinth-a" x="208" y="348" width="32" height="32"/>
+            <rect class="plinth-b" x="240" y="348" width="32" height="32"/>
+            <rect class="plinth-a" x="80" y="380" width="32" height="32"/>
+            <rect class="plinth-b" x="112" y="380" width="32" height="32"/>
+            <rect class="plinth-a" x="144" y="380" width="32" height="32"/>
+            <rect class="plinth-b" x="176" y="380" width="32" height="32"/>
+            <rect class="plinth-a" x="208" y="380" width="32" height="32"/>
+            <ellipse class="stone" cx="160" cy="340" rx="78" ry="16"/>
+            <rect class="stone" x="92" y="86" width="136" height="254"/>
+            <ellipse class="stone" cx="160" cy="86" rx="68" ry="18"/>
+            <ellipse class="ring" cx="160" cy="128" rx="86" ry="20"/>
+            <ellipse class="hole" cx="160" cy="128" rx="62" ry="12"/>
+            <ellipse class="ring" cx="160" cy="196" rx="90" ry="22"/>
+            <ellipse class="hole" cx="160" cy="196" rx="64" ry="13"/>
+            <ellipse class="ring" cx="160" cy="268" rx="86" ry="20"/>
+            <ellipse class="hole" cx="160" cy="268" rx="62" ry="12"/>
+            <ellipse class="cap" cx="160" cy="58" rx="42" ry="28"/>
+            <rect class="rod" x="154" y="18" width="12" height="44"/>
+          </svg>
+          <div class="contact"></div>
+        </figure>
+      </section>
+
+      <section class="slab" aria-label="Engine">
+        <header class="slab-head">
+          <div class="badges" role="tablist" aria-label="File">
+            <button class="badge is-on" data-file="contribute" role="tab" aria-selected="true">CTR</button>
+            <button class="badge" data-file="take" role="tab" aria-selected="false">TAK</button>
+            <button class="badge" data-file="ledger" role="tab" aria-selected="false">LDG</button>
+          </div>
+          <div class="index" id="index" title="Macs in pool">0</div>
+        </header>
+        <p class="file" id="filename">CONTRIBUTE.sc</p>
+        <div class="code" id="code"></div>
+      </section>
+    </div>
+
+    <nav class="rail" aria-label="Finish">
+      <button class="seg is-on" data-ink="carbon"><i></i><span>CARBON</span></button>
+      <button class="seg" data-ink="poster"><i></i><span>POSTER</span></button>
+      <button class="seg" data-ink="signal"><i></i><span>SIGNAL</span></button>
+      <button class="seg" data-ink="thermal"><i></i><span>THERMAL</span></button>
+      <button class="seg" data-ink="void"><i></i><span>VOID</span></button>
+    </nav>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

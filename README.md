@@ -2,7 +2,7 @@
 
 Pooling engine: pipeline-parallel LoRA fine-tunes across Apple Silicon Macs on a LAN. Contributors run a headless agent; one coordinator schedules stages, records usage, and checks work.
 
-Linux, VMs, credits, and the web app are later. This repo is the Mac engine.
+Accounts, credits, and grants are later. This build is the Mac engine plus a local app.
 
 ## Install
 
@@ -15,13 +15,23 @@ uv sync --group dev
 
 ## Quick start
 
-Open the desktop window. Pick **Host pool** on one Mac and **Join pool** on the others.
+Install a double-clickable Mac app (once per machine):
+
+```bash
+uv sync --group dev
+./scripts/macos/install_app.sh
+open ~/Applications/compute.app
+```
+
+That writes `~/Applications/compute.app`. It opens a `/compute` window (not Safari, not Terminal). Closing the window does not stop the pool.
+
+From this repo you can also run:
 
 ```bash
 uv run slashcompute
 ```
 
-Host shows this Mac’s LAN IP. Join can type that address or press **Find on LAN**. Start/Stop spawn the same coordinator and agent the CLI uses. Closing the window leaves them running.
+On the host Mac: **CTR** → HOST → START. Copy the LAN address. On the others: JOIN, paste that address or FIND_ON_LAN, START. Submit a fine-tune from **TAK** (JSONL on the host). **LDG** is raw FLOPs.
 
 The rest of this README is the terminal equivalent.
 
@@ -106,5 +116,5 @@ uv run pytest -m integration -q
 1. Agents register, pass a short GPU canary, and heartbeat.
 2. The coordinator splits the model by layer, sized to each Mac's contributed memory.
 3. Neighbouring stages open a TCP link and run a GPipe LoRA step: activations forward, gradients back.
-4. Each step is metered (FLOPs, memory, time). Credits are derived later.
+4. Each step is metered (FLOPs, memory, time).
 5. `stop` drains after the current step; a crash resumes from the last complete checkpoint.

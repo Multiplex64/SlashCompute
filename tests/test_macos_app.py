@@ -3,7 +3,7 @@ import stat
 import subprocess
 from pathlib import Path
 
-from slashcompute.launcher.main import ensure_shell, ui_ready
+from slashcompute.launcher.main import SHELL_GENERATION, ensure_shell, ui_ready
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,7 +30,7 @@ def test_ui_ready_rejects_foreign_port(monkeypatch):
 
 def test_ensure_shell_attaches_when_already_up(monkeypatch):
     monkeypatch.setattr("slashcompute.launcher.main.ui_ready", lambda url, timeout=0.6: True)
-    monkeypatch.setattr("slashcompute.launcher.main._shell_generation", lambda url: 2)
+    monkeypatch.setattr("slashcompute.launcher.main._shell_generation", lambda url: SHELL_GENERATION)
     assert ensure_shell() == "http://127.0.0.1:8766"
 
 
@@ -55,4 +55,6 @@ def test_install_app_writes_plist_and_launcher(tmp_path):
     assert str(repo) in launch
     assert "-m slashcompute.launcher.main" in launch
     assert os.access(dest / "Contents" / "MacOS" / "compute", os.X_OK)
-    assert (dest / "Contents" / "Resources" / "icon.png").is_file()
+    icon = dest / "Contents" / "Resources" / "icon.png"
+    assert icon.is_file()
+    assert icon.read_bytes() == (ROOT / "scripts" / "macos" / "icon.png").read_bytes()

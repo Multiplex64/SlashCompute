@@ -43,4 +43,6 @@ def test_spec_validation():
         LoraFinetuneSpec(dataset_path="x", batch_size=3, microbatches=2)
     with pytest.raises(ValueError):
         parse_spec({"kind": "run_arbitrary_code", "dataset_path": "x"})
+    with pytest.raises(ValueError, match="not allowed"):
+        parse_spec({"dataset_path": "x", "model": "evil/malware-repo"})
     assert parse_spec({"dataset_path": "x"}).kind == "lora_finetune"

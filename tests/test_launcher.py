@@ -97,7 +97,7 @@ def test_coordinator_and_agent_argv(tmp_path):
     assert launcher.agent_argv("http://192.168.1.20:8765", 40) == [
         "/opt/venv/bin/python", "-m", "slashcompute.agent.main", "start",
         "--url", "http://192.168.1.20:8765", "--gpu-percent", "40",
-        "--no-sandbox", "--home", str(tmp_path),
+        "--home", str(tmp_path),
     ]
     assert "--session-token" in launcher.agent_argv(
         "http://192.168.1.20:8765", 40, session_token="tok",
@@ -132,7 +132,7 @@ def test_start_host_spawns_coordinator_and_agent(tmp_path, monkeypatch):
     assert argv_lists[0][:4] == ["/opt/venv/bin/python", "-m", "slashcompute.coordinator.main", "serve"]
     assert argv_lists[1][2:4] == ["slashcompute.agent.main", "start"]
     assert "--url" in argv_lists[1] and "127.0.0.1" in argv_lists[1][argv_lists[1].index("--url") + 1]
-    assert "--no-sandbox" in argv_lists[1]
+    assert "--no-sandbox" not in argv_lists[1]
     assert (tmp_path / "coordinator.pid").read_text().strip() == str(launcher._spawned[0].pid)
     assert snap.last_error == ""
 
@@ -231,3 +231,30 @@ def test_snapshot_reads_health_and_agent_status(tmp_path, monkeypatch):
     assert snap.agent_running is True
     assert snap.agent_status == "idle"
     assert snap.lan_ip == "192.168.9.9"
+
+
+def test_stop_agent_leaves_coordinator_running(tmp_path, monkeypatch):
+    kills: list[tuple[int, int]] = []
+    monkeypatch.setattr("os.kill", lambda pid, sig: kills.append((pid, sig)))
+    monkeypatch.setattr("slashcompute.agent.daemon._alive", lambda pid: True)
+    launcher = _launcher(tmp_path)
+    (tmp_path / "coordinator.pid").write_text("111\n")
+    (tmp_path / "agent" / "agent.pid").write_text("222\n")
+    launcher.stop_agent()
+    assert (222, signal.SIGTERM) in kills
+    assert (111, signal.SIGTERM) not in kills  # only liveness probes (signal 0)
+
+
+def test_my_node_id_never_creates_one(tmp_path):
+    launcher = _launcher(tmp_path)
+    assert launcher.my_node_id() is None
+    assert not launcher.paths.node_id_file.exists()
+    launcher.paths.node_id_file.write_text("abc123\n")
+    assert launcher.my_node_id() == "abc123"
+
+
+def test_fetch_pool_down_and_partial(tmp_path):
+    assert _launcher(tmp_path, http=FakeHTTP(None)).fetch_pool("http://x:8765").online is False
+    # Health answers but list endpoints return a dict: tolerated as empty lists.
+    pool = _launcher(tmp_path, http=FakeHTTP({"ok": True})).fetch_pool("http://x:8765")
+    assert pool.online is True and (pool.nodes, pool.jobs, pool.ledger) == ([], [], [])

@@ -119,6 +119,7 @@ class User(SQLModel, table=True):
     flagged: bool = False
     grant_split: int = 0
     google_sub: Optional[str] = Field(default=None, index=True)
+    bio: Optional[str] = None
     accepted_terms_at: Optional[float] = None
     created_at: float = Field(default_factory=now)
 
@@ -168,6 +169,9 @@ class Grant(SQLModel, table=True):
     received_flops: float = 0.0
     status: str = "pending"
     created_at: float = Field(default_factory=now)
+    reviewed_at: Optional[float] = None
+    reviewed_by: Optional[str] = None
+    review_note: Optional[str] = None
 
 
 class GrantComment(SQLModel, table=True):
@@ -197,10 +201,20 @@ class Database:
 
     def _migrate(self) -> None:
         with self.engine.connect() as conn:
-            cols = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(users)").fetchall()}
-            if "google_sub" not in cols:
+            user_cols = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(users)").fetchall()}
+            if "google_sub" not in user_cols:
                 conn.exec_driver_sql("ALTER TABLE users ADD COLUMN google_sub VARCHAR")
-                conn.commit()
+            if "bio" not in user_cols:
+                conn.exec_driver_sql("ALTER TABLE users ADD COLUMN bio VARCHAR")
+            grant_cols = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(grants)").fetchall()}
+            if grant_cols:
+                if "reviewed_at" not in grant_cols:
+                    conn.exec_driver_sql("ALTER TABLE grants ADD COLUMN reviewed_at FLOAT")
+                if "reviewed_by" not in grant_cols:
+                    conn.exec_driver_sql("ALTER TABLE grants ADD COLUMN reviewed_by VARCHAR")
+                if "review_note" not in grant_cols:
+                    conn.exec_driver_sql("ALTER TABLE grants ADD COLUMN review_note VARCHAR")
+            conn.commit()
 
     def session(self) -> Session:
         return Session(self.engine, expire_on_commit=False)

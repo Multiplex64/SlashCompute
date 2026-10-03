@@ -18,6 +18,7 @@ from slashcompute.agent.daemon import request_stop
 from slashcompute.agent.paths import AgentPaths
 from slashcompute.common.config import EngineConfig
 from slashcompute.common.discovery import discover, lan_ip
+from slashcompute.launcher.dashboard import PoolData
 
 
 class LauncherError(Exception):
@@ -108,7 +109,7 @@ class Launcher:
         self.home.mkdir(parents=True, exist_ok=True)
         self.python = python or sys.executable
         self._popen = popen
-        self._http = http or httpx.Client()
+        self._http = http or httpx.Client(follow_redirects=False)
         self._discover = discover_fn
         self._lan_ip = lan_ip_fn
         self.last_error = ""
@@ -171,7 +172,7 @@ class Launcher:
         argv = [
             self.python, "-m", "slashcompute.agent.main", "start",
             "--url", url, "--gpu-percent", str(int(gpu_percent)),
-            "--no-sandbox", "--home", str(self.home),
+            "--home", str(self.home),
         ]
         if session_token:
             argv.extend(["--session-token", session_token])
@@ -271,6 +272,34 @@ class Launcher:
             except OSError:
                 self.coordinator_pid_path.unlink(missing_ok=True)
         return self.snapshot()
+
+    def stop_agent(self) -> StatusSnapshot:
+        """Stop contributing; a coordinator hosted here keeps running."""
+        self.last_error = ""
+        request_stop(self.paths)
+        return self.snapshot()
+
+    def my_node_id(self) -> Optional[str]:
+        """This Mac's agent id, once it has registered. Never creates one."""
+        try:
+            return self.paths.node_id_file.read_text().strip() or None
+        except OSError:
+            return None
+
+    def fetch_pool(self, url: str) -> PoolData:
+        """Nodes, jobs and ledger from the coordinator, or empty when it is down."""
+        if not url or not self.poll_health(url):
+            return PoolData()
+        return PoolData(online=True, nodes=self._get_list(url, "/nodes"),
+                        jobs=self._get_list(url, "/jobs"), ledger=self._get_list(url, "/ledger"))
+
+    def _get_list(self, url: str, path: str) -> list:
+        try:
+            r = self._http.get(f"{url.rstrip('/')}{path}", timeout=1.5)
+            data = r.json() if r.status_code == 200 else []
+        except Exception:
+            return []
+        return data if isinstance(data, list) else []
 
     def snapshot(self, settings: Optional[LauncherSettings] = None) -> StatusSnapshot:
         s = settings.clamp() if settings is not None else self.load_settings()

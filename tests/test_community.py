@@ -112,8 +112,10 @@ def test_terms_and_grant_split(core):
     assert user.accepted_terms_at is None
     user = core.auth.accept_terms(user)
     assert user.accepted_terms_at is not None
-    user = core.auth.update_profile(user, grant_split=25)
+    user = core.auth.update_profile(user, grant_split=25, bio="  hello  ")
     assert user.grant_split == 25
+    assert user.bio == "hello"
+    assert core.auth.public_view(user)["bio"] == "hello"
     with pytest.raises(AuthError):
         core.auth.update_profile(user, grant_split=101)
     with pytest.raises(AuthError):
@@ -169,12 +171,17 @@ def test_reserve_consume_settle(core):
         core.credits.reserve_job(user.id, "job-x", 5000.0)
     core.credits.reserve_job(user.id, "job-1", 400.0)
     assert core.credits.balance(user.id) == 600.0
-    assert core.credits.consume_job("job-1", 150.0) is False
+    assert core.credits.summary(user.id)["reserved_in_flight"] == 400.0
+    assert core.credits.consume_job("job-1", 150.0) == 150.0
     assert core.credits.lifetime_spent(user.id) == 150.0
-    assert core.credits.consume_job("job-1", 300.0) is True
+    assert core.credits.job_exhausted("job-1") is False
+    assert core.credits.summary(user.id)["reserved_in_flight"] == 250.0
+    assert core.credits.consume_job("job-1", 300.0) == 250.0
     assert core.credits.lifetime_spent(user.id) == 400.0
+    assert core.credits.job_exhausted("job-1") is True
     core.credits.settle_job("job-1")
     assert core.credits.balance(user.id) == 600.0
+    assert core.credits.reserved_in_flight(user.id) == 0.0
 
 
 def test_settle_releases_leftover(core):
@@ -553,3 +560,166 @@ def test_grant_split_on_step(core):
     )))
     assert core.credits.balance(POT_ID) == pytest.approx(40.0)
     assert core.credits.lifetime_earned(user.id) == pytest.approx(1e12 + 100.0)
+
+
+def test_last_step_mints_only_charged_flops(core):
+    tiny_model, tiny_dataset = core._tiny
+    user, token = _account(core.auth)
+    core.auth.accept_terms(user)
+    core.credits.contribute(user.id, 1e12, 0)
+    job = core.submit(_spec(tiny_model, tiny_dataset))
+    core.credits.reserve_job(user.id, job.id, 1.5e9)
+    job.current = EpochState(epoch=1, plans=[])
+    job.row.status = "running"
+
+    async def send(_):
+        return None
+
+    asyncio.run(core.on_register(P.Register(
+        node_id="n1", name="mac", device=_device(), data_host="127.0.0.1",
+        data_port=9700, gpu_percent=50, session_token=token,
+    ), send))
+    asyncio.run(core._on_step("n1", P.StepMetrics(
+        job_id=job.id, epoch=1, stage_idx=0, step=1, loss=1.0,
+        in_digest="in", out_digest="out", usage=_usage(2e9),
+    )))
+    assert core.credits.lifetime_spent(user.id) == pytest.approx(1.5e9)
+    assert core.credits.lifetime_earned(user.id) == pytest.approx(1e12 + 1.5e9)
+    assert job.row.status == "cancelled"
+    assert job.row.error == "FLOP budget spent"
+
+
+def test_session_without_max_flops_abandons_job(env):
+    client, core, tiny_model, tiny_dataset = env
+    token = client.post("/auth/register", json={
+        "email": "ada@lan.test", "password": "password1", "name": "Ada",
+    }).json()["token"]
+    client.post("/auth/accept-terms", headers=_hdr(token))
+    spec = json.loads(_spec(tiny_model, tiny_dataset).model_dump_json())
+    r = client.post("/jobs", json=spec, headers=_hdr(token))
+    assert r.status_code == 400
+    assert "max_flops" in r.json()["detail"]
+    assert core.jobs == {}
+    client.cookies.clear()
+    r = client.post("/jobs", json=spec, headers=_hdr(token))
+    assert r.status_code == 400
+    assert core.jobs == {}
+    login = client.post("/auth/login", json={"email": "ada@lan.test", "password": "password1"})
+    assert login.status_code == 200
+    r = client.post("/jobs", json=spec)
+    assert r.status_code == 400
+    assert "max_flops" in r.json()["detail"]
+    assert core.jobs == {}
+
+
+def test_http_community_lists_live_and_admin(env):
+    client, core, tiny_model, tiny_dataset = env
+    admin_tok = client.post("/auth/register", json={
+        "email": "admin@lan.test", "password": "password1", "name": "Admin",
+    }).json()["token"]
+    member_tok = client.post("/auth/register", json={
+        "email": "m@lan.test", "password": "password1", "name": "Member",
+    }).json()["token"]
+    donor_tok = client.post("/auth/register", json={
+        "email": "d@lan.test", "password": "password1", "name": "Donor",
+    }).json()["token"]
+    client.post("/auth/accept-terms", headers=_hdr(admin_tok))
+    client.post("/auth/accept-terms", headers=_hdr(member_tok))
+    client.post("/auth/accept-terms", headers=_hdr(donor_tok))
+    donor = core.auth.user_from_token(donor_tok)
+    member = core.auth.user_from_token(member_tok)
+    core.credits.contribute(donor.id, 200.0, 50)
+    core.credits.bind_node("n-mac", member.id)
+
+    me = client.get("/credits/me", headers=_hdr(donor_tok)).json()
+    assert me["balance"] == 100.0
+    assert me["reserved_in_flight"] == 0.0
+    assert me["pot"] == 100.0
+
+    tx = client.get("/credits/transactions?limit=2", headers=_hdr(donor_tok)).json()
+    assert len(tx["items"]) == 2
+    assert {row["kind"] for row in tx["items"]} <= {"earn", "generated"}
+    assert all("created_at" in row for row in tx["items"])
+    page = client.get(
+        f"/credits/transactions?limit=1&before_id={tx['items'][0]['id']}",
+        headers=_hdr(donor_tok),
+    ).json()
+    assert len(page["items"]) == 1
+    assert page["items"][0]["id"] < tx["items"][0]["id"]
+
+    live = client.get("/credits/live?window_s=60", headers=_hdr(donor_tok)).json()
+    assert live["window_s"] == 60.0
+    assert live["you"]["flops"] == pytest.approx(200.0)
+    assert live["community_flops"] == pytest.approx(200.0)
+    assert live["reserved_in_flight"] == 0.0
+
+    nodes = client.get("/auth/me/nodes", headers=_hdr(member_tok)).json()
+    assert nodes == [{
+        "node_id": "n-mac", "user_id": member.id, "online": False,
+        "status": None, "gpu_percent": None,
+    }]
+
+    bio = client.patch("/auth/me", json={"bio": "writes grants"}, headers=_hdr(member_tok))
+    assert bio.json()["user"]["bio"] == "writes grants"
+
+    core.credits.contribute(member.id, 1e12, 0)
+    spec = json.loads(_spec(tiny_model, tiny_dataset).model_dump_json())
+    spec["max_flops"] = 2e11
+    taken = client.post("/jobs", json=spec, headers=_hdr(member_tok))
+    assert taken.status_code == 200, taken.text
+    job_id = taken.json()["id"]
+    mine = client.get("/jobs?mine=1", headers=_hdr(member_tok)).json()
+    assert [j["id"] for j in mine] == [job_id]
+    others = client.get("/jobs?mine=1", headers=_hdr(donor_tok)).json()
+    assert others == []
+
+    g = client.post("/grants", json={
+        "title": "Need compute", "body": "A short paragraph about the need.",
+        "goal_flops": 50,
+    }, headers=_hdr(member_tok)).json()
+    client.cookies.clear()
+    comment = client.post(f"/grants/{g['id']}/comments", json={"body": "please fund"},
+                          headers=_hdr(member_tok))
+    assert comment.status_code == 200, comment.text
+    assert comment.json()["id"] is not None
+
+    declined = client.post(f"/admin/grants/{g['id']}/review",
+                           json={"approve": False, "note": "too vague"},
+                           headers=_hdr(admin_tok)).json()
+    assert declined["status"] == "declined"
+    assert declined["review_note"] == "too vague"
+    assert declined["reviewed_by"]
+    assert declined["reviewed_at"]
+
+    g2 = client.post("/grants", json={
+        "title": "Need more", "body": "Another short paragraph about the need.",
+        "goal_flops": 80,
+    }, headers=_hdr(member_tok)).json()
+    client.post(f"/admin/grants/{g2['id']}/review", json={"approve": True},
+                headers=_hdr(admin_tok))
+    g3 = client.post("/grants", json={
+        "title": "Need most", "body": "A third short paragraph about the need.",
+        "goal_flops": 20,
+    }, headers=_hdr(member_tok)).json()
+    client.post(f"/admin/grants/{g3['id']}/review", json={"approve": True},
+                headers=_hdr(admin_tok))
+    d1 = client.post(f"/grants/{g2['id']}/donate", json={"flops": 10},
+                     headers=_hdr(donor_tok))
+    assert d1.status_code == 200, d1.text
+    d2 = client.post(f"/grants/{g3['id']}/donate", json={"flops": 20, "from_pot": True},
+                     headers=_hdr(admin_tok))
+    assert d2.status_code == 200, d2.text
+    assert d1.json()["received_flops"] == 10
+    assert d2.json()["received_flops"] == 20
+
+    least = client.get("/grants?sort=least").json()
+    assert [row["id"] for row in least] == [g2["id"], g3["id"]]
+    trending = client.get("/grants?sort=trending").json()
+    assert [row["id"] for row in trending] == [g3["id"], g2["id"]]
+
+    client.post(f"/admin/users/{member.id}/flag", json={"reason": "spam"},
+                headers=_hdr(admin_tok))
+    flags = client.get("/admin/flags", headers=_hdr(admin_tok)).json()
+    assert flags[0]["user_id"] == member.id
+    assert flags[0]["reason"] == "spam"
+    assert client.get("/admin/flags", headers=_hdr(member_tok)).status_code == 403

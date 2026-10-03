@@ -7,7 +7,7 @@ from typing import Optional
 from sqlalchemy import func
 from sqlmodel import select
 
-from slashcompute.coordinator.db import CreditTxn, Database, JobAccount, NodeOwner, User
+from slashcompute.coordinator.db import CreditTxn, Database, JobAccount, NodeOwner, User, now
 
 POT_ID = "__pot__"
 BALANCE_KINDS = ("earn", "reserve", "release", "donate", "receive", "allocate")
@@ -58,6 +58,11 @@ class Credits:
             ).one()
         return float(total or 0.0)
 
+    def reserved_in_flight(self, user_id: str) -> float:
+        with self.db.session() as s:
+            rows = s.exec(select(JobAccount).where(JobAccount.user_id == user_id)).all()
+        return float(sum(max(0.0, a.reserved_flops - a.spent_flops) for a in rows))
+
     def summary(self, user_id: str) -> dict:
         return {
             "user_id": user_id,
@@ -65,7 +70,65 @@ class Credits:
             "lifetime_earned": self.lifetime_earned(user_id),
             "lifetime_spent": self.lifetime_spent(user_id),
             "pot": self.balance(POT_ID),
+            "reserved_in_flight": self.reserved_in_flight(user_id),
         }
+
+    def list_txns(self, user_id: str, *, limit: int = 50,
+                  before_id: Optional[int] = None) -> dict:
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            limit = 50
+        limit = max(1, min(200, limit))
+        with self.db.session() as s:
+            q = select(CreditTxn).where(CreditTxn.user_id == user_id)
+            if before_id is not None:
+                q = q.where(CreditTxn.id < int(before_id))
+            q = q.order_by(CreditTxn.id.desc())
+            rows = list(s.exec(q).all())[: limit + 1]
+        items = rows[:limit]
+        return {
+            "items": [
+                {
+                    "id": r.id, "kind": r.kind, "amount": r.amount,
+                    "job_id": r.job_id, "grant_id": r.grant_id, "node_id": r.node_id,
+                    "note": r.note, "created_at": r.created_at,
+                }
+                for r in items
+            ],
+            "next_cursor": items[-1].id if len(rows) > limit else None,
+        }
+
+    def live(self, user_id: str, window_s: float = 60.0) -> dict:
+        try:
+            window_s = float(window_s)
+        except (TypeError, ValueError):
+            window_s = 60.0
+        window_s = max(1.0, min(3600.0, window_s))
+        cutoff = now() - window_s
+        with self.db.session() as s:
+            recent = list(s.exec(
+                select(CreditTxn).where(
+                    CreditTxn.kind == "generated", CreditTxn.created_at >= cutoff,
+                )
+            ).all())
+        you_flops = sum(r.amount for r in recent if r.user_id == user_id)
+        community_flops = sum(r.amount for r in recent if r.user_id != POT_ID)
+        snap = self.summary(user_id)
+        return {
+            **snap,
+            "window_s": window_s,
+            "community_flops": community_flops,
+            "you": {
+                "flops": you_flops,
+                "balance": snap["balance"],
+                "lifetime_earned": snap["lifetime_earned"],
+            },
+        }
+
+    def nodes_for(self, user_id: str) -> list[NodeOwner]:
+        with self.db.session() as s:
+            return list(s.exec(select(NodeOwner).where(NodeOwner.user_id == user_id)).all())
 
     def bind_node(self, node_id: str, user_id: str) -> None:
         self.db.save(NodeOwner(node_id=node_id, user_id=user_id))
@@ -103,17 +166,23 @@ class Credits:
     def job_account(self, job_id: str) -> Optional[JobAccount]:
         return self.db.get(JobAccount, job_id)
 
-    def consume_job(self, job_id: str, flops: float) -> bool:
-        """Charge a job's reserve. Returns True if the budget is exhausted."""
+    def consume_job(self, job_id: str, flops: float) -> float:
+        """Charge a job's reserve. Returns FLOPs actually charged."""
         acct = self.job_account(job_id)
         if acct is None or flops <= 0:
-            return False
+            return 0.0
         remaining = acct.reserved_flops - acct.spent_flops
         take = min(flops, remaining)
         if take:
             acct.spent_flops += take
             self.db.save(acct)
             self.post(acct.user_id, "consumed", take, job_id=job_id)
+        return take
+
+    def job_exhausted(self, job_id: str) -> bool:
+        acct = self.job_account(job_id)
+        if acct is None:
+            return False
         return acct.spent_flops >= acct.reserved_flops - 1e-9
 
     def settle_job(self, job_id: str) -> None:

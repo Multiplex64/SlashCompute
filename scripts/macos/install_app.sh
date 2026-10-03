@@ -66,34 +66,12 @@ exec "$PY" -m slashcompute.launcher.main
 EOF
 chmod +x "$MACOS/compute"
 
-python3 - "$RES" <<'PY'
-import struct, sys, zlib
-from pathlib import Path
-
-out = Path(sys.argv[1])
-size = 1024
-# carbon field, paper slash
-px = bytearray()
-for y in range(size):
-    px.append(0)
-    for x in range(size):
-        # two stacked bars like / 
-        t = (x + (size - 1 - y)) / (size * 2)
-        band = abs((x - y) - size * 0.18) < size * 0.07
-        if band:
-            px.extend((0xF2, 0xF2, 0xF0))
-        else:
-            px.extend((0x14, 0x14, 0x14))
-
-def chunk(tag, data):
-    crc = zlib.crc32(tag + data) & 0xFFFFFFFF
-    return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", crc)
-
-raw = bytes(px)
-ihdr = struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0)
-png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b"")
-(out / "icon.png").write_bytes(png)
-PY
+ICON_SRC="$SCRIPT_DIR/icon.png"
+if [[ ! -f "$ICON_SRC" ]]; then
+  echo "Missing app icon at $ICON_SRC" >&2
+  exit 1
+fi
+cp "$ICON_SRC" "$RES/icon.png"
 
 if command -v sips >/dev/null && command -v iconutil >/dev/null; then
   ICONSET="$RES/AppIcon.iconset"

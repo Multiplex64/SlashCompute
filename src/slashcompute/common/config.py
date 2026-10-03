@@ -17,7 +17,17 @@ DEMO_MODEL_CANDIDATES = [
     "mlx-community/Qwen2.5-32B-Instruct-4bit",
 ]
 
+ALLOWED_MODELS = (DEV_MODEL, *DEMO_MODEL_CANDIDATES)
+
 MDNS_SERVICE_TYPE = "_slashcompute._tcp.local."
+
+
+def allowed_model(model: str) -> bool:
+    """Catalog HF ids, or a local directory the coordinator already has."""
+    name = (model or "").strip()
+    if name in ALLOWED_MODELS:
+        return True
+    return Path(name).expanduser().is_dir()
 
 
 @dataclass

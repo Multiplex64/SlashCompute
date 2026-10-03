@@ -1,36 +1,40 @@
-const FILES = {
-  contribute: "CONTRIBUTE.sc",
-  take: "TAKE.sc",
-  ledger: "LEDGER.sc",
+// /compute dashboard. Polls /api/overview and updates the widgets in place;
+// forms are static markup, so polling never clobbers what you are typing.
+
+const T = 1e12;
+const SETTING_KEYS = ["mode", "url", "gpu_percent", "contribute", "finish", "session_token", "grant_split"];
+const STATUS_TONE = {
+  running: "ok", completed: "line", starting: "line", queued: "warn", recovering: "warn",
+  failed: "hot", cancelled: "",
 };
 
 const state = {
-  file: "contribute",
-  finish: "carbon",
-  settings: {
-    mode: "host", url: "", gpu_percent: 50, contribute: true, finish: "carbon",
-    session_token: "", grant_split: 0,
-  },
-  status: {},
-  nodes: [],
-  jobs: [],
-  ledger: [],
-  selectedJob: null,
-  error: "",
-  notice: "",
-  datasetName: "",
-  datasetFile: null,
-  take: {
-    model: "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
-    steps: 10,
-    min_stages: 2,
-  },
+  tab: "contributions",
+  ov: null,
+  settings: null,
+  saving: 0,
+  rates: [],
+  last: null,
+  grants: null,
+  sort: "top",
+  admin: false,
+  fundOpen: null,
+  fundMsg: "",
+  busy: new Set(),
+  dataset: null,
+  modelsShown: "",
+  keys: {},
+  user: null,
+  credits: null,
+  authMode: "login",
+  terms: "",
 };
 
 const $ = (sel) => document.querySelector(sel);
+const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 
 async function api(path, opts = {}) {
-  const next = { ...opts, headers: { ...(opts.headers || {}) } };
+  const next = { ...opts, credentials: "include", headers: { ...(opts.headers || {}) } };
   if (next.body && !(next.body instanceof FormData) && !next.headers["content-type"]) {
     next.headers["content-type"] = "application/json";
   }
@@ -47,263 +51,847 @@ async function api(path, opts = {}) {
   return data;
 }
 
-function kw(s) { return `<span class="kw">${esc(s)}</span>`; }
-function str(s) { return `<span class="str">${esc(s)}</span>`; }
-function cm(s) { return `<span class="cm">${esc(s)}</span>`; }
+const post = (path, body) => api(path, { method: "POST", body: body === undefined ? undefined : JSON.stringify(body) });
+const patch = (path, body) => api(path, { method: "PATCH", body: JSON.stringify(body) });
+const signedIn = () => !!(state.user && state.user.id);
+
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
   }[c]));
 }
 
-function line(n, html) {
-  return `<div class="line"><span class="ln">${n}</span><div>${html}</div></div>`;
-}
-function lines(rows) {
-  return rows.map((html, i) => line(i + 1, html || "&nbsp;")).join("");
-}
-function btn(id, label, extra = "") {
-  return `<button type="button" class="btn ${extra}" data-act="${id}">${label}</button>`;
-}
+// ------------------------------------------------------------ formatting
 
-function render() {
-  const active = document.activeElement;
-  const keepId = active && active.id && /^(INPUT|TEXTAREA)$/.test(active.tagName) ? active.id : null;
-  const keepPos = keepId && typeof active.selectionStart === "number" ? active.selectionStart : null;
-
-  const file = state.file;
-  $("#filename").textContent = FILES[file] || file;
-  document.querySelectorAll(".badge").forEach((b) => {
-    const on = b.dataset.file === file;
-    b.classList.toggle("is-on", on);
-    b.disabled = false;
-    b.setAttribute("aria-selected", on ? "true" : "false");
-  });
-  $("#index").textContent = String(state.status.nodes ?? 0);
-  if (file === "contribute") $("#code").innerHTML = lines(contributeLines());
-  else if (file === "take") $("#code").innerHTML = lines(takeLines());
-  else $("#code").innerHTML = lines(ledgerLines());
-  bindPane();
-
-  if (keepId) {
-    const el = document.getElementById(keepId);
-    if (el) {
-      el.focus();
-      if (keepPos != null && el.setSelectionRange) {
-        try { el.setSelectionRange(keepPos, keepPos); } catch { /* number */ }
-      }
-    }
+function fmtFlops(x) {
+  let v = Number(x) || 0;
+  let unit = "";
+  for (const u of ["K", "M", "G", "T", "P", "E"]) {
+    if (Math.abs(v) < 1000) break;
+    v /= 1000;
+    unit = u;
   }
+  const text = v === 0 ? "0" : Math.abs(v) >= 100 ? v.toFixed(0) : Math.abs(v) >= 10 ? v.toFixed(1) : v.toFixed(2);
+  return unit ? `${text} ${unit}` : text;
 }
 
-function poolLines() {
-  const s = state.settings;
-  const st = state.status;
-  const host = s.mode === "host";
-  const rows = [
-    `${kw("mode")}    = ${str(s.mode.toUpperCase())}`,
-    `<span class="row">${btn("mode-host", "HOST")}${btn("mode-join", "JOIN", "ghost")}</span>`,
-  ];
-  if (host) {
-    rows.push(`${kw("address")} = ${str(st.lan_ip || "—")}`);
-    rows.push(`<span class="row">${btn("copy-ip", "COPY")}</span>`);
-    rows.push(`<label class="chk"><input type="checkbox" id="contribute" ${s.contribute ? "checked" : ""}> also contribute this Mac</label>`);
-  } else {
-    rows.push(`${kw("coordinator")} =`);
-    rows.push(`<input type="text" id="url" value="${esc(s.url)}" placeholder="192.168.1.10:8765" spellcheck="false">`);
-    rows.push(`<span class="row">${btn("discover", "FIND_ON_LAN")}</span>`);
+function withUnit(x, unit = "FLOPs") {
+  const s = fmtFlops(x);
+  return /[A-Z]$/.test(s) ? s + unit : `${s} ${unit}`;
+}
+
+function fmtBytes(n) {
+  let v = Number(n) || 0;
+  let unit = "B";
+  for (const u of ["KB", "MB", "GB", "TB"]) {
+    if (Math.abs(v) < 1024) break;
+    v /= 1024;
+    unit = u;
   }
-  rows.push(`${kw("coordinator")} ${st.coordinator_up ? str("UP") : kw("OFFLINE")}  ${cm(`nodes=${st.nodes ?? 0}`)}`);
-  rows.push(`${kw("agent")}       ${st.agent_running ? str(st.agent_status || "RUNNING") : kw("STOPPED")}`);
-  return rows;
+  return v === 0 ? "0" : `${v >= 100 ? v.toFixed(0) : v.toFixed(1)} ${unit}`;
 }
 
-function contributeLines() {
-  const s = state.settings;
-  const st = state.status;
-  const rows = [
-    `${kw("kind")} = ${str("contribute")}`,
-    ...poolLines(),
-    `${kw("gpu")}   = ${str(s.gpu_percent + "%")}`,
-    `<input type="range" id="gpu" min="1" max="100" value="${s.gpu_percent}">`,
-  ];
-  if (state.error) rows.push(`<span class="err">${esc(state.error)}</span>`);
-  else if (st.last_error && !st.coordinator_up) rows.push(`<span class="err">${esc(st.last_error)}</span>`);
-  rows.push(`<span class="row">${btn("start", "START")}${btn("stop", "STOP", "ghost")}</span>`);
-  rows.push(`${cm("# allow TCP 8765 on the host, 9700 on each agent")}`);
-  return rows;
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+const shortModel = (m) => String(m || "").split("/").pop();
+const modelLabel = (m) => shortModel(m).replace(/-Instruct-4bit$/, "").replace(/-/g, " ");
+const setText = (sel, text) => { const el = $(sel); if (el && el.textContent !== text) el.textContent = text; };
+
+function setTag(sel, text, tone) {
+  const el = $(sel);
+  el.textContent = text;
+  el.className = `tag ${tone || ""}`.trim();
 }
 
-function takeLines() {
-  const t = state.take;
-  const rows = [
-    `${kw("kind")}       = ${str("lora_finetune")}`,
-    `${kw("model")}      =`,
-    `<input type="text" id="model" value="${esc(t.model)}" spellcheck="false">`,
-    `${kw("steps")}      = <input type="number" id="steps" min="1" value="${t.steps}" style="max-width:88px">`,
-    `${kw("min_stages")} = <input type="number" id="min_stages" min="1" value="${t.min_stages}" style="max-width:88px">`,
-    `${kw("dataset")}    = ${str(state.datasetName || "none")}`,
-    `<span class="row"><label class="btn">${state.datasetName ? "REPLACE.JSONL" : "DATASET.JSONL"}<input type="file" id="dataset" accept=".jsonl,application/jsonl,text/plain" hidden></label></span>`,
-    `<span class="row">${btn("submit", "SUBMIT")}</span>`,
-  ];
-  if (state.notice) rows.push(`${cm("# " + state.notice)}`);
-  if (state.error) rows.push(`<span class="err">${esc(state.error)}</span>`);
-  rows.push("");
-  rows.push(`${cm("# queue  (FIFO — later jobs wait if the head cannot fit)")}`);
-  if (!state.status.coordinator_up) rows.push(`${cm("# coordinator offline")}`);
-  else if (!state.jobs.length) rows.push(`<span class="empty">// queue empty</span>`);
-  else rows.push(`<div class="jobs">${state.jobs.map(jobRow).join("")}</div>`);
-  return rows;
+function setDot(sel, tone, live = false) {
+  const el = $(sel);
+  el.className = `sq ${tone || ""} ${live ? "live" : ""}`.trim();
 }
 
-function jobRow(j) {
-  const on = state.selectedJob === j.id ? " is-on" : "";
-  const wait = j.wait_reason ? `  ${j.wait_reason}` : "";
-  return `<div class="job${on}" data-job="${esc(j.id)}"><b>${esc(j.id)}</b><span>${esc(j.status)}${esc(wait)}</span><em>${esc(j.progress_step ?? 0)}/${esc(j.steps)}</em></div>`;
+// Re-render a list only when its data changed, so hover and focus survive polls.
+function renderOnce(key, data, el, html) {
+  const sig = JSON.stringify(data);
+  if (state.keys[key] === sig) return;
+  state.keys[key] = sig;
+  el.innerHTML = html();
 }
 
-function ledgerLines() {
-  const rows = [
-    `${kw("kind")} = ${str("meter")}`,
-    `${cm("# raw FLOPs per node")}`,
-  ];
-  if (!state.ledger.length) rows.push(`<span class="empty">// no steps yet</span>`);
-  for (const r of state.ledger) {
-    rows.push(`${str((r.node_id || "").slice(0, 12))}  ${kw(r.kind)}  ${str(fmt(r.flops))}`);
+function rangeFill(el) {
+  const pct = ((el.value - el.min) / (el.max - el.min)) * 100;
+  el.style.setProperty("--pct", `${pct}%`);
+}
+
+function toast(text, tone = "ok") {
+  const el = $("#toast");
+  el.querySelector("span").textContent = text;
+  el.className = `toast ${tone === "bad" ? "bad" : ""}`.trim();
+  el.hidden = false;
+  window.clearTimeout(toast.timer);
+  toast.timer = window.setTimeout(() => { el.hidden = true; }, tone === "bad" ? 6000 : 3500);
+}
+
+// ------------------------------------------------------------ derived values
+
+const status = () => (state.ov && state.ov.status) || {};
+const pool = () => (state.ov && state.ov.pool) || { online: false, nodes: [], jobs: [], capacity: {} };
+const me = () => (state.ov && state.ov.me) || { flops: 0 };
+
+function credits() {
+  const split = Number((state.user && state.user.grant_split)
+    ?? (state.settings || {}).grant_split) || 0;
+  if (state.credits) {
+    const earned = Math.max(0, Number(state.credits.lifetime_earned) || 0);
+    const toGrants = earned * split / 100;
+    return {
+      earned, toGrants, kept: earned - toGrants, split,
+      balance: Math.max(0, Number(state.credits.balance) || 0),
+    };
   }
-  return rows;
+  const earned = Math.max(0, Number(me().flops) || 0);
+  const toGrants = earned * split / 100;
+  return { earned, toGrants, kept: earned - toGrants, split, balance: 0 };
 }
 
-function fmt(n) {
-  const x = Number(n);
-  if (!Number.isFinite(x)) return "0";
-  if (Math.abs(x) >= 1e6 || (x !== 0 && Math.abs(x) < 1e-2)) return x.toExponential(2);
-  return String(Math.round(x * 100) / 100);
+function grantBalance() {
+  if (state.credits) return Math.max(0, Number(state.credits.balance) || 0);
+  if (state.grants && state.grants.available != null) return Math.max(0, Number(state.grants.available) || 0);
+  return 0;
 }
 
-function bindPane() {
-  const map = {
-    url: (el) => { state.settings.url = el.value.trim(); saveSettings(); },
-    gpu: (el) => { state.settings.gpu_percent = Number(el.value); saveSettings(); render(); },
-    contribute: (el) => { state.settings.contribute = el.checked; saveSettings(); },
-    model: (el) => { state.take.model = el.value.trim(); },
-    steps: (el) => { state.take.steps = Number(el.value) || 10; },
-    min_stages: (el) => { state.take.min_stages = Number(el.value) || 2; },
-  };
-  for (const [id, fn] of Object.entries(map)) {
-    const el = document.getElementById(id);
-    if (!el) continue;
-    el.addEventListener(el.type === "range" || el.type === "checkbox" ? "input" : "change", () => fn(el));
-  }
-  const file = $("#dataset");
-  if (file) file.addEventListener("change", () => {
-    state.datasetFile = file.files[0] || null;
-    state.datasetName = state.datasetFile ? state.datasetFile.name : "";
-    render();
-  });
-  document.querySelectorAll("[data-act]").forEach((b) => {
-    b.addEventListener("click", () => act(b.dataset.act));
-  });
-  document.querySelectorAll("[data-job]").forEach((el) => {
-    el.addEventListener("click", () => { state.selectedJob = el.dataset.job; render(); });
-  });
+function fmtWait(s) {
+  if (s == null || !Number.isFinite(Number(s))) return "unknown wait";
+  const n = Number(s);
+  if (n < 60) return `${Math.max(1, Math.round(n))}s`;
+  if (n < 3600) return `${Math.max(1, Math.round(n / 60))} min`;
+  return `${(n / 3600).toFixed(1)} h`;
 }
 
-async function saveSettings() {
+// ------------------------------------------------------------ settings
+
+function pickSettings(src) {
+  return Object.fromEntries(SETTING_KEYS.map((k) => [k, src[k]]));
+}
+
+async function saveSettings(changes) {
+  state.settings = { ...state.settings, ...changes };
+  state.saving += 1;
   try {
-    await api("/api/settings", { method: "POST", body: JSON.stringify(state.settings) });
+    state.settings = pickSettings(await post("/api/settings", state.settings));
   } catch (e) {
-    state.error = e.message;
+    toast(e.message, "bad");
+  } finally {
+    state.saving -= 1;
   }
 }
 
-async function act(name) {
-  state.error = "";
-  state.notice = "";
-  try {
-    if (name === "mode-host") { state.settings.mode = "host"; await saveSettings(); }
-    else if (name === "mode-join") { state.settings.mode = "join"; await saveSettings(); }
-    else if (name === "copy-ip") await navigator.clipboard.writeText(state.status.lan_ip || "");
-    else if (name === "discover") {
-      const r = await api("/api/discover", { method: "POST" });
-      state.settings.url = r.url;
-    } else if (name === "start") {
-      Object.assign(state.status, await api("/api/start", {
-        method: "POST", body: JSON.stringify(state.settings),
-      }));
-    } else if (name === "stop") {
-      Object.assign(state.status, await api("/api/stop", { method: "POST" }));
-    } else if (name === "submit") await submitJob();
-  } catch (e) {
-    state.error = e.message;
-  }
-  await refresh();
-}
+// ------------------------------------------------------------ polling
 
-async function submitJob() {
-  if (!state.datasetFile) throw new Error("Choose a JSONL dataset on this Mac.");
-  const body = new FormData();
-  body.append("dataset", state.datasetFile);
-  body.append("model", state.take.model);
-  body.append("steps", String(state.take.steps));
-  body.append("min_stages", String(state.take.min_stages));
-  const job = await api("/api/coord/jobs/upload", { method: "POST", body });
-  state.selectedJob = job.id;
-  state.notice = "Queued. FIFO — it waits if the pool cannot fit it yet.";
-}
-
-async function refresh() {
+async function poll() {
   try {
-    const snap = await api("/api/status");
-    state.status = snap;
-    const focus = document.activeElement && document.activeElement.id;
-    state.settings.mode = snap.mode;
-    if (focus !== "url") state.settings.url = snap.url;
-    if (focus !== "gpu") state.settings.gpu_percent = snap.gpu_percent;
-    state.settings.contribute = snap.contribute;
-    state.settings.session_token = snap.session_token || "";
-    state.settings.grant_split = snap.grant_split ?? 0;
-    if (snap.finish && snap.finish !== state.finish) applyFinish(snap.finish, false);
-    if (snap.coordinator_up) {
-      try {
-        state.nodes = await api("/api/coord/nodes");
-        state.jobs = await api("/api/coord/jobs");
-        state.ledger = await api("/api/coord/ledger");
-      } catch (e) {
-        state.error = state.error || e.message;
-      }
-    }
+    const ov = await api("/api/overview");
+    trackRate(ov);
+    state.ov = ov;
+    if (!state.settings || state.saving === 0) state.settings = pickSettings(ov.status);
+    if (ov.status && ov.status.coordinator_up) await loadAuth();
+    else { state.user = null; state.credits = null; }
   } catch (e) {
-    state.error = e.message;
+    state.ov = null;
+    state.user = null;
+    state.credits = null;
   }
   render();
 }
 
-function applyFinish(name, persist = true) {
-  state.finish = name;
-  state.settings.finish = name;
-  document.documentElement.dataset.ink = name;
-  document.querySelectorAll(".seg").forEach((s) => s.classList.toggle("is-on", s.dataset.ink === name));
-  const wipe = $("#wipe");
-  wipe.hidden = false;
-  wipe.classList.remove("is-on");
-  void wipe.offsetWidth;
-  wipe.classList.add("is-on");
-  window.setTimeout(() => { wipe.classList.remove("is-on"); wipe.hidden = true; }, 760);
-  if (persist) saveSettings();
+async function loadAuth() {
+  try {
+    const me = await api("/api/coord/auth/me");
+    state.user = (me && me.user) || null;
+    state.credits = (me && me.credits) || null;
+    if (state.user && !state.user.accepted_terms && !state.terms) {
+      const t = await api("/api/coord/auth/terms");
+      state.terms = (t && t.text) || "";
+    }
+  } catch {
+    state.user = null;
+    state.credits = null;
+  }
 }
 
-document.querySelectorAll(".badge").forEach((b) => {
-  b.addEventListener("click", () => {
-    state.file = b.dataset.file;
-    state.error = "";
-    state.notice = "";
-    render();
+function trackRate(ov) {
+  if (!ov.pool.online) return;
+  const now = Date.now() / 1000;
+  const flops = Number(ov.me.flops) || 0;
+  if (state.last && now > state.last[0]) {
+    state.rates.push(Math.max(0, (flops - state.last[1]) / (now - state.last[0])));
+    if (state.rates.length > 48) state.rates.shift();
+  }
+  state.last = [now, flops];
+}
+
+function render() {
+  renderSidebar();
+  renderAuth();
+  renderContributions();
+  renderUsage();
+  renderGrantsLive();
+  renderPool();
+}
+
+// ------------------------------------------------------------ sidebar + tabs
+
+function showTab(name) {
+  state.tab = name;
+  $$(".nav-item").forEach((b) => {
+    const on = b.dataset.tab === name;
+    b.classList.toggle("is-on", on);
+    b.setAttribute("aria-selected", on ? "true" : "false");
   });
-});
-document.querySelectorAll(".seg").forEach((s) => {
-  s.addEventListener("click", () => applyFinish(s.dataset.ink));
+  $$(".view").forEach((v) => v.classList.toggle("is-on", v.id === `view-${name}`));
+  $("#main").scrollTop = 0;
+  if (name === "grants") loadGrants();
+}
+
+function renderSidebar() {
+  const st = status();
+  if (!state.ov) {
+    setDot("#side-dot", "hot");
+    setText("#side-title", "No connection");
+    setText("#side-sub", "The local /compute service is not answering.");
+  } else if (st.coordinator_up) {
+    setDot("#side-dot", "ok");
+    setText("#side-title", st.coordinator_pid ? "Hosting" : "Joined");
+    setText("#side-sub", `${plural(st.nodes || 0, "Mac")} · ${plural(st.jobs || 0, "job")}`);
+  } else {
+    setDot("#side-dot", "");
+    setText("#side-title", "Offline");
+    setText("#side-sub", "No pool running");
+  }
+  const agent = $("#side-agent");
+  agent.hidden = !st.agent_running;
+  agent.textContent = `Contributing · ${(state.settings || {}).gpu_percent ?? 0}%`;
+}
+
+function renderAuth() {
+  const gate = $("#auth-gate");
+  const form = $("#auth-form");
+  const terms = $("#auth-terms");
+  const userBox = $("#auth-user");
+  const online = !!(status().coordinator_up);
+  $("#auth-submit").disabled = !online;
+  if (signedIn() && !state.user.accepted_terms) {
+    gate.hidden = true;
+    form.hidden = true;
+    terms.hidden = false;
+    userBox.hidden = true;
+    if (state.terms) $("#terms-text").textContent = state.terms;
+    return;
+  }
+  if (signedIn()) {
+    gate.hidden = true;
+    form.hidden = true;
+    terms.hidden = true;
+    userBox.hidden = false;
+    setText("#auth-who", state.user.name || state.user.email);
+    setText("#auth-sub", state.user.admin ? "Admin on this pool" : state.user.email);
+    return;
+  }
+  userBox.hidden = true;
+  terms.hidden = true;
+  if (!form.hidden) {
+    gate.hidden = true;
+    $("#auth-submit").textContent = state.authMode === "register" ? "Create account" : "Sign in";
+    $("#auth-name").hidden = state.authMode !== "register";
+  } else {
+    gate.hidden = false;
+  }
+}
+
+// ------------------------------------------------------------ contributions
+
+function sparkline(svg, values) {
+  const w = 200;
+  const h = 40;
+  const vals = values.slice(-48);
+  const top = Math.max(0, ...vals);
+  if (vals.length < 2 || top <= 0) {
+    svg.innerHTML = `<line x1="0" y1="${h - 1}" x2="${w}" y2="${h - 1}" stroke="#3a3a3a" stroke-width="2" stroke-dasharray="4 5"/>`;
+    return;
+  }
+  const step = w / (vals.length - 1);
+  const pts = vals.map((v, i) => `${(i * step).toFixed(1)},${(h - 2 - (v / top) * (h - 6)).toFixed(1)}`);
+  svg.innerHTML = `<polygon points="0,${h} ${pts.join(" ")} ${w},${h}" fill="rgba(214,255,0,0.12)"/>`
+    + `<polyline points="${pts.join(" ")}" fill="none" stroke="#d6ff00" stroke-width="2" vector-effect="non-scaling-stroke"/>`;
+}
+
+function renderContributions() {
+  const st = status();
+  const m = me();
+  const c = credits();
+  const rate = state.rates.length ? state.rates[state.rates.length - 1] : 0;
+
+  setText("#c-flops", fmtFlops(c.earned));
+  setText("#c-flops-sub", c.earned
+    ? `FLOPs total · ${rate > 0 ? withUnit(rate, "FLOP/s") + " now" : "idle right now"}`
+    : "Nothing yet. Start contributing to earn.");
+  sparkline($("#c-spark"), state.rates);
+  setText("#c-earned", fmtFlops(c.earned));
+  setText("#c-earned-sub", signedIn()
+    ? `On this account · you keep ${withUnit(c.kept)}`
+    : `Estimated · you keep ${withUnit(c.kept)}`);
+  setText("#c-grants", fmtFlops(c.toGrants));
+  setText("#c-grants-sub", signedIn()
+    ? `${c.split}% of lifetime earnings`
+    : `Estimated · ${c.split}% of what you earn`);
+  setText("#c-rank", m.rank ? `#${m.rank}` : "—");
+  setText("#c-rank-sub", m.rank ? `of ${plural(m.of, "Mac")} in the pool` : "Not ranked yet");
+
+  const running = !!st.agent_running;
+  const s = state.settings || {};
+  setTag("#c-pill", running ? `Contributing · ${s.gpu_percent}%` : "Not contributing", running ? "ok" : "");
+  setDot("#c-dot", running ? "ok" : "", running);
+  if (running) {
+    const job = st.agent_job_id ? ` · job ${String(st.agent_job_id).slice(0, 8)}` : "";
+    setText("#c-state", `Contributing${job}`);
+    setText("#c-detail", `Agent is ${st.agent_status || "running"}. Earning whenever the pool has work.`);
+  } else {
+    const where = s.mode === "host" ? "hosted on this Mac" : (s.url || "no address set yet");
+    setText("#c-state", "Not contributing");
+    setText("#c-detail", `Start to lend this Mac to the pool (${where}). It runs in the background.`);
+  }
+  const toggle = $("#c-toggle");
+  if (!state.busy.has("contribute")) {
+    toggle.textContent = running ? "Stop contributing" : "Start contributing";
+    toggle.className = `btn block ${running ? "ghost" : "primary"}`;
+    toggle.disabled = !state.ov;
+  }
+
+  const gpu = $("#gpu");
+  if (document.activeElement !== gpu && s.gpu_percent != null) gpu.value = s.gpu_percent;
+  rangeFill(gpu);
+  setText("#gpu-out", `${gpu.value}%`);
+  const live = m.node && m.node.gpu_percent;
+  setText("#gpu-hint", running && live && live !== Number(gpu.value)
+    ? `Running at ${live}%. The new share applies next time you start.`
+    : "Higher shares earn credits faster but leave less GPU for you.");
+
+  const split = $("#split");
+  if (document.activeElement !== split) split.value = c.split;
+  rangeFill(split);
+  setText("#split-grants", `${split.value}%`);
+  setText("#split-keep", `${100 - split.value}%`);
+  setText("#split-grants-amt", `≈ ${withUnit(c.toGrants)}`);
+  setText("#split-keep-amt", `≈ ${withUnit(c.kept)}`);
+  setText("#split-hint", signedIn()
+    ? "Credits are 1:1 with FLOPs. This split is saved on your account."
+    : "Credits are 1:1 with FLOPs. Sign in so this split is saved on your account.");
+
+  const node = m.node;
+  renderOnce("mac", [node, m.node_id], $("#c-mac"), () => node ? `
+    <dl class="kv">
+      <dt>Name</dt><dd>${esc(node.name)}</dd>
+      <dt>Chip</dt><dd>${esc(node.chip || "—")}</dd>
+      <dt>Memory lent</dt><dd>${fmtBytes(node.memory_contrib_bytes)}</dd>
+      <dt>Matmul speed</dt><dd>${Number(node.matmul_tflops || 0).toFixed(1)} TFLOPS</dd>
+      <dt>GPU share in use</dt><dd>${esc(node.gpu_percent)}%</dd>
+      <dt>Data address</dt><dd>${esc(node.data_addr || "—")}</dd>
+      <dt>Node id</dt><dd class="mono-sm">${esc(String(m.node_id || "").slice(0, 12))}</dd>
+    </dl>` : `<p class="empty">Start contributing to register this Mac with the pool.</p>`);
+}
+
+// ------------------------------------------------------------ usage
+
+function renderUsage() {
+  const p = pool();
+  const cap = p.capacity || {};
+  setText("#u-macs", String(cap.macs || 0));
+  setText("#u-macs-sub", p.online ? "contributing right now" : "pool offline");
+  setText("#u-tflops", Number(cap.tflops || 0).toFixed(1));
+  setText("#u-mem", fmtBytes(cap.memory_bytes || 0));
+  setText("#u-jobs", String(cap.running || 0));
+  setText("#u-jobs-sub", `running · ${cap.waiting || 0} waiting`);
+  setText("#u-pill", signedIn()
+    ? `${withUnit(credits().balance)} available`
+    : `≈ ${withUnit(credits().kept)} to spend`);
+  $("#flop-budget").hidden = !signedIn();
+
+  const models = status().models || [];
+  if (models.length && state.modelsShown !== models.join()) {
+    const sel = $("#model");
+    const keep = sel.value;
+    sel.innerHTML = models.map((m, i) => `<option value="${esc(m)}">${esc(modelLabel(m))}${i === 0 ? " · quick test" : ""}</option>`).join("");
+    if (models.includes(keep)) sel.value = keep;
+    state.modelsShown = models.join();
+  }
+
+  const submit = $("#job-submit");
+  if (!state.busy.has("submit")) submit.disabled = !p.online;
+  $("#u-open-pool").hidden = p.online;
+  const msg = $("#job-msg");
+  if (!p.online && !msg.dataset.sticky) setMsg("#job-msg", "Start or join a pool to submit jobs.", "");
+  else if (p.online && msg.dataset.offline) setMsg("#job-msg", "", "");
+  msg.dataset.offline = p.online ? "" : "1";
+
+  setText("#u-count", String(p.jobs.length));
+  renderOnce("jobs", p.jobs, $("#jobs"), () => p.jobs.length ? p.jobs.map(jobCard).join("")
+    : `<p class="empty">No jobs yet. Submit one and it will appear here.</p>`);
+}
+
+function jobCard(j) {
+  const status = String(j.status || "");
+  const cls = ["running", "starting"].includes(status) ? "is-active"
+    : ["queued", "recovering"].includes(status) ? "is-waiting" : "";
+  const meta = [`Step ${j.progress_step ?? 0} of ${j.steps ?? 0}`];
+  if (j.last_loss != null) meta.push(`loss ${Number(j.last_loss).toFixed(3)}`);
+  if (j.stages && j.stages.length) meta.push(plural(j.stages.length, "Mac"));
+  meta.push(String(j.id).slice(0, 8));
+  let note = "";
+  if (j.error) note = `<p class="note">${esc(j.error)}</p>`;
+  else if (["queued", "recovering"].includes(status) && (j.queue_position != null || j.wait_s != null || j.wait_reason)) {
+    const bits = [];
+    if (j.queue_position != null) bits.push(`queue #${j.queue_position}`);
+    bits.push(j.wait_s == null ? "unknown wait" : `~${fmtWait(j.wait_s)}`);
+    if (j.wait_reason) bits.push(j.wait_reason);
+    note = `<p class="note">Waitlist ${esc(bits.join(" · "))}</p>`;
+  } else if (j.wait_reason) note = `<p class="note">Waiting: ${esc(j.wait_reason)}</p>`;
+  else if (j.adapter_dir) note = `<p class="note ok">Adapter ready at ${esc(j.adapter_dir)}</p>`;
+  const cancel = j.can_cancel
+    ? `<button type="button" class="btn ghost sm" data-cancel="${esc(j.id)}">Cancel</button>` : "";
+  return `<div class="job ${cls}">
+    <div class="job-top"><b>${esc(modelLabel(j.model))}</b><span class="tag ${STATUS_TONE[status] || ""}">${esc(status)}</span>${cancel}</div>
+    <div class="bar ${status === "completed" ? "done" : ""}"><i style="width:${(Number(j.progress) * 100).toFixed(1)}%"></i></div>
+    <p class="meta">${esc(meta.join(" · "))}</p>${note}
+  </div>`;
+}
+
+function setMsg(sel, text, tone) {
+  const el = $(sel);
+  el.textContent = text;
+  el.className = `msg ${tone || ""}`.trim();
+}
+
+// ------------------------------------------------------------ grants
+
+async function loadGrants() {
+  try {
+    state.grants = await api(`/api/grants?sort=${encodeURIComponent(state.sort)}`);
+  } catch (e) {
+    toast(e.message, "bad");
+  }
+  renderGrants();
+  renderGrantsLive();
+}
+
+function renderGrantsLive() {
+  const g = state.grants;
+  const bal = grantBalance();
+  setText("#g-avail", g || signedIn() ? fmtFlops(bal) : "—");
+  setText("#g-avail-sub", signedIn()
+    ? `${withUnit(credits().balance)} personal balance`
+    : "Sign in to fund grants with your credits.");
+  setText("#g-pledged", g ? fmtFlops(g.pledged) : "—");
+  setText("#g-open", g ? String(g.grants.length) : "—");
+  setText("#g-open-sub", g ? `${g.pending.length} waiting for review` : "");
+  setTag("#g-pill", g && g.online ? "Live" : "Offline", g && g.online ? "ok" : "");
+
+  const board = (g && g.leaders && g.leaders.length)
+    ? g.leaders
+    : ((state.ov && state.ov.leaderboard) || []);
+  const online = pool().online;
+  renderOnce("leaders", [board, online], $("#leaders"), () => {
+    if (!board.length) {
+      return `<li class="empty">${online ? "No contributions yet." : "Start or join a pool to see who is giving the most."}</li>`;
+    }
+    return board.slice(0, 8).map((r) => `<li class="${r.is_me ? "is-me" : ""}">
+      <span class="rank">${r.rank}</span>
+      <span class="name">${esc(r.name)}${r.is_me ? ` <span class="tag ok">You</span>` : ""}</span>
+      <span class="flops">${esc(withUnit(r.flops))}</span>
+    </li>`).join("");
+  });
+}
+
+function renderGrants() {
+  const g = state.grants;
+  $$("#g-sort button").forEach((b) => b.classList.toggle("is-on", b.dataset.sort === state.sort));
+  if (!g) return;
+  const admin = !!(state.user && state.user.admin);
+
+  $("#g-list").innerHTML = g.grants.length ? g.grants.map(grantCard).join("")
+    : `<article class="card"><p class="empty">${g.online ? "No public grants yet." : "Start or join a pool to see live grants."}</p></article>`;
+
+  $("#g-review").hidden = !admin;
+  setTag("#g-review-count", String(g.pending.length), g.pending.length ? "hot" : "");
+  $("#g-pending").innerHTML = g.pending.length ? g.pending.map((p) => `<div class="pending">
+      <div class="top"><b>${esc(p.title)}</b><span class="muted">${esc(withUnit(p.goal))} goal</span></div>
+      <p class="hint">by ${esc(p.author)}</p>
+      <p class="summary">${esc(p.summary)}</p>
+      <div class="btn-row">
+        <button type="button" class="btn primary sm" data-review="${esc(p.id)}" data-approve="1">Approve</button>
+        <button type="button" class="btn danger sm" data-review="${esc(p.id)}" data-approve="">Decline</button>
+      </div>
+    </div>`).join("") : `<p class="empty">Nothing waiting for review.</p>`;
+}
+
+function grantCard(g) {
+  const funded = g.remaining <= 0;
+  const open = state.fundOpen === g.id;
+  const actions = open ? `
+      <input type="number" min="1" step="1" id="fund-${esc(g.id)}" value="${Math.max(1, Math.min(25, Math.floor(g.remaining / T)))}" aria-label="TFLOPs to pledge">
+      <span class="unit">TFLOPs</span>
+      <button type="button" class="btn primary sm" data-fund-go="${esc(g.id)}">Pledge</button>
+      <button type="button" class="btn ghost sm" data-fund-close>Cancel</button>`
+    : `<button type="button" class="btn ${funded ? "ghost" : "primary"} sm" data-fund-open="${esc(g.id)}" ${funded ? "disabled" : ""}>${funded ? "Funded" : "Fund this grant"}</button>`;
+  return `<article class="card grant">
+    <div class="top"><span class="tag line">${esc(g.tag)}</span><span class="hint">${plural(g.backers, "backer")}</span></div>
+    <h3>${esc(g.title)}</h3>
+    <p class="by">by ${esc(g.author)}</p>
+    <p class="summary">${esc(g.summary)}</p>
+    <div class="bar ${funded ? "done" : ""}"><i style="width:${(g.progress * 100).toFixed(1)}%"></i></div>
+    <div class="nums"><span>${esc(fmtFlops(g.raised))} of ${esc(withUnit(g.goal))}</span><span>${Math.round(g.progress * 100)}%</span></div>
+    <div class="actions">${actions}</div>
+    ${open && state.fundMsg ? `<p class="msg bad">${esc(state.fundMsg)}</p>` : ""}
+  </article>`;
+}
+
+async function grantAction(path, body, okText) {
+  try {
+    state.grants = await post(path, { ...body, sort: state.sort });
+    if (okText) toast(okText);
+    return true;
+  } catch (e) {
+    return e.message;
+  } finally {
+    renderGrants();
+    renderGrantsLive();
+  }
+}
+
+// ------------------------------------------------------------ pool
+
+function renderPool() {
+  const st = status();
+  const s = state.settings || {};
+  const host = s.mode !== "join";
+  $$("#p-mode button").forEach((b) => b.classList.toggle("is-on", b.dataset.mode === (host ? "host" : "join")));
+  $("#p-host").hidden = !host;
+  $("#p-join").hidden = host;
+  setText("#p-ip", st.lan_ip || "—");
+  const url = $("#url");
+  if (document.activeElement !== url && url.value !== (s.url || "")) url.value = s.url || "";
+
+  const banner = $("#p-banner");
+  banner.hidden = !st.last_error;
+  banner.textContent = st.last_error || "";
+
+  if (!state.busy.has("pool")) {
+    const hosting = st.coordinator_pid != null;
+    $("#p-start").textContent = hosting ? "Hosting" : "Start hosting";
+    $("#p-start").disabled = hosting || !state.ov;
+    $("#p-stop").disabled = !(st.coordinator_up || st.agent_running);
+  }
+
+  const job = st.agent_job_id ? ` · job ${String(st.agent_job_id).slice(0, 8)}` : "";
+  const rows = [
+    ["Coordinator", st.coordinator_up, st.coordinator_up ? (st.coordinator_pid ? "hosting here" : "reachable") : "offline"],
+    ["This Mac's agent", st.agent_running, st.agent_running ? `${st.agent_status || "running"}${job}` : "not contributing"],
+    ["Macs in pool", (st.nodes || 0) > 0, st.coordinator_up ? String(st.nodes || 0) : "—"],
+    ["Jobs", (st.jobs || 0) > 0, st.coordinator_up ? String(st.jobs || 0) : "—"],
+    ["Address", st.coordinator_up, st.coordinator_url || "—"],
+  ];
+  renderOnce("status", rows, $("#p-status"), () => rows.map(([name, ok, value]) =>
+    `<dt><i class="sq ${ok ? "ok" : ""}"></i>${esc(name)}</dt><dd>${esc(value)}</dd>`).join(""));
+
+  const nodes = pool().nodes;
+  setText("#p-count", String(nodes.length));
+  renderOnce("macs", nodes, $("#p-macs"), () => nodes.length ? `<table class="macs">
+      <thead><tr><th>Mac</th><th>Chip</th><th>Memory lent</th><th>GPU</th><th>FLOPs given</th><th>Status</th></tr></thead>
+      <tbody>${nodes.map((n) => {
+        const ok = n.canary_passed !== false && !n.draining;
+        return `<tr>
+          <td><span class="who"><i class="sq ${ok ? "ok" : "hot"}"></i>${esc(n.name || String(n.node_id).slice(0, 8))}${n.is_me ? ` <span class="tag ok">You</span>` : ""}</span></td>
+          <td>${esc(n.chip || "—")}</td>
+          <td class="num">${fmtBytes(n.memory_contrib_bytes)}</td>
+          <td class="num">${esc(n.gpu_percent)}%</td>
+          <td class="num">${esc(withUnit(n.flops))}</td>
+          <td>${esc(n.draining ? "draining" : (n.status || "—"))}</td>
+        </tr>`;
+      }).join("")}</tbody></table>`
+    : `<p class="empty">No Macs connected yet. Start contributing here, or have others join.</p>`);
+
+  setText("#p-hint", host
+    ? "Firewall: allow incoming TCP 8765 on this Mac and 9700 on each contributing Mac."
+    : "Firewall: allow incoming TCP 9700 on this Mac so pipeline peers can reach it.");
+}
+
+// ------------------------------------------------------------ actions
+
+async function withBusy(key, button, busyText, fn) {
+  if (state.busy.has(key)) return;
+  state.busy.add(key);
+  const idle = button ? button.textContent : "";
+  if (button) { button.disabled = true; button.textContent = busyText; }
+  try {
+    await fn();
+  } catch (e) {
+    toast(e.message, "bad");
+  } finally {
+    state.busy.delete(key);
+    if (button) { button.disabled = false; button.textContent = idle; }
+    await poll();
+  }
+}
+
+const actions = {
+  "toggle-contribute": (btn) => {
+    const running = !!status().agent_running;
+    return withBusy("contribute", btn, running ? "Stopping…" : "Starting…", async () => {
+      if (running) {
+        await post("/api/stop-agent");
+        toast("Stopped contributing. The current step finishes first.");
+        return;
+      }
+      const snap = await post("/api/start", { ...state.settings, contribute: true });
+      if (snap.last_error) toast(snap.last_error, "bad");
+      else toast("Contributing. This Mac picks up work whenever the pool has some.");
+    });
+  },
+
+  host: (btn) => withBusy("pool", btn, "Starting…", async () => {
+    const snap = await post("/api/start", { ...state.settings, mode: "host", contribute: false });
+    if (snap.last_error) toast(snap.last_error, "bad");
+    else toast("Pool is up. Share this Mac's address with the others.");
+  }),
+
+  "stop-pool": (btn) => withBusy("pool", btn, "Stopping…", async () => {
+    await post("/api/stop");
+    toast("Pool stopped.");
+  }),
+
+  connect: (btn) => withBusy("connect", btn, "Connecting…", async () => {
+    const url = $("#url").value.trim();
+    if (!url) throw new Error("Enter the host Mac's address, or press Find on LAN.");
+    await saveSettings({ mode: "join", url });
+    const ov = await api("/api/overview");
+    if (!ov.status.coordinator_up) throw new Error(`No coordinator answering at ${ov.status.coordinator_url}.`);
+    toast(`Connected to ${ov.status.coordinator_url}`);
+  }),
+
+  discover: (btn) => withBusy("discover", btn, "Searching…", async () => {
+    const r = await post("/api/discover");
+    state.settings = { ...state.settings, url: r.url };
+    $("#url").value = r.url;
+    toast(`Found a pool at ${r.url}`);
+  }),
+
+  "copy-ip": async (btn) => {
+    const ip = status().lan_ip || "";
+    try {
+      await navigator.clipboard.writeText(ip);
+    } catch {
+      const t = Object.assign(document.createElement("textarea"), { value: ip });
+      document.body.append(t);
+      t.select();
+      document.execCommand("copy");
+      t.remove();
+    }
+    btn.textContent = "Copied";
+    window.setTimeout(() => { btn.textContent = "Copy"; }, 1400);
+  },
+
+  "show-auth": () => {
+    $("#auth-gate").hidden = true;
+    $("#auth-form").hidden = false;
+    $("#auth-email").focus();
+    renderAuth();
+  },
+
+  "auth-mode": () => {
+    state.authMode = state.authMode === "register" ? "login" : "register";
+    const btn = document.querySelector("[data-act='auth-mode']");
+    if (btn) btn.textContent = state.authMode === "register" ? "Have an account" : "Create account";
+    renderAuth();
+  },
+
+  "accept-terms": (btn) => withBusy("terms", btn, "Saving…", async () => {
+    await post("/api/coord/auth/accept-terms", {});
+    await loadAuth();
+    toast("Terms accepted.");
+  }),
+
+  logout: (btn) => withBusy("auth", btn, "Signing out…", async () => {
+    await post("/api/coord/auth/logout", {});
+    await saveSettings({ session_token: "" });
+    state.user = null;
+    state.credits = null;
+    toast("Signed out.");
+  }),
+
+  "toggle-request": () => {
+    if (!signedIn()) return toast("Sign in to request a grant.", "bad");
+    const card = $("#g-request");
+    card.hidden = !card.hidden;
+    setMsg("#g-msg", "", "");
+    if (!card.hidden) $("#g-title").focus();
+  },
+};
+
+document.addEventListener("click", async (e) => {
+  const el = e.target.closest("button, [data-tab]");
+  if (!el || el.disabled) return;
+  const d = el.dataset;
+  if (d.tab) return showTab(d.tab);
+  if (d.act && actions[d.act]) return actions[d.act](el);
+  if (d.mode) {
+    await saveSettings({ mode: d.mode });
+    return poll();
+  }
+  if (d.sort) {
+    state.sort = d.sort;
+    return loadGrants();
+  }
+  if (d.cancel) {
+    return withBusy(`cancel-${d.cancel}`, el, "Cancelling…", () => post(`/api/coord/jobs/${encodeURIComponent(d.cancel)}/cancel`));
+  }
+  if (d.fundOpen) {
+    state.fundOpen = d.fundOpen;
+    state.fundMsg = "";
+    renderGrants();
+    const input = $(`#fund-${CSS.escape(d.fundOpen)}`);
+    if (input) input.focus();
+    return;
+  }
+  if ("fundClose" in d) {
+    state.fundOpen = null;
+    return renderGrants();
+  }
+  if (d.fundGo) {
+    const tflops = Number($(`#fund-${CSS.escape(d.fundGo)}`).value);
+    const grant = state.grants.grants.find((g) => g.id === d.fundGo);
+    const res = await grantAction(`/api/grants/${encodeURIComponent(d.fundGo)}/fund`,
+      { amount: tflops * T }, `Pledged ${withUnit(tflops * T)} to ${grant ? grant.title : "the grant"}`);
+    state.fundMsg = res === true ? "" : res;
+    if (res === true) state.fundOpen = null;
+    return renderGrants();
+  }
+  if (d.review) {
+    const approve = !!d.approve;
+    const res = await grantAction(`/api/grants/${encodeURIComponent(d.review)}/review`, { approve },
+      approve ? "Approved. It's public now." : "Declined.");
+    if (res !== true) toast(res, "bad");
+  }
 });
 
-refresh();
-window.setInterval(refresh, 2000);
+$("#gpu").addEventListener("input", (e) => {
+  rangeFill(e.target);
+  setText("#gpu-out", `${e.target.value}%`);
+});
+$("#gpu").addEventListener("change", async (e) => {
+  await saveSettings({ gpu_percent: Number(e.target.value) });
+  render();
+});
+
+$("#split").addEventListener("input", (e) => {
+  state.settings = { ...state.settings, grant_split: Number(e.target.value) };
+  renderContributions();
+  renderGrantsLive();
+});
+$("#split").addEventListener("change", async (e) => {
+  const grant_split = Number(e.target.value);
+  await saveSettings({ grant_split });
+  if (signedIn()) {
+    try {
+      const r = await patch("/api/coord/auth/me", { grant_split });
+      if (r && r.user) state.user = r.user;
+    } catch (err) {
+      toast(err.message, "bad");
+    }
+  }
+});
+
+$("#url").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") actions.connect($("#p-connect"));
+});
+
+$("#dataset").addEventListener("change", (e) => {
+  state.dataset = e.target.files[0] || null;
+  const name = $("#dataset-name");
+  name.textContent = state.dataset ? state.dataset.name : "No file chosen";
+  name.classList.toggle("sig", !!state.dataset);
+});
+
+$("#job-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const msg = $("#job-msg");
+  if (!state.dataset) return setMsg("#job-msg", "Choose a JSONL dataset first.", "bad");
+  const steps = Number($("#steps").value);
+  const minStages = Number($("#min_stages").value);
+  if (!Number.isInteger(steps) || steps < 1) return setMsg("#job-msg", "Steps must be a whole number above zero.", "bad");
+  if (!Number.isInteger(minStages) || minStages < 1) return setMsg("#job-msg", "Min Macs must be at least 1.", "bad");
+  const body = new FormData();
+  body.append("dataset", state.dataset);
+  body.append("model", $("#model").value);
+  body.append("steps", String(steps));
+  body.append("min_stages", String(minStages));
+  if (signedIn()) {
+    const tflops = Number($("#max_flops").value);
+    if (!Number.isFinite(tflops) || tflops <= 0) {
+      return setMsg("#job-msg", "Set a FLOP budget above zero.", "bad");
+    }
+    body.append("max_flops", String(tflops * T));
+  }
+  setMsg("#job-msg", `Uploading ${state.dataset.name}…`, "");
+  msg.dataset.sticky = "1";
+  return withBusy("submit", $("#job-submit"), "Uploading…", async () => {
+    try {
+      const job = await api("/api/coord/jobs/upload", { method: "POST", body });
+      setMsg("#job-msg", `Submitted job ${String(job.id).slice(0, 8)}. It starts when enough Macs are free.`, "ok");
+      toast("Job submitted");
+    } catch (err) {
+      setMsg("#job-msg", err.message, "bad");
+    } finally {
+      delete msg.dataset.sticky;
+    }
+  });
+});
+
+$("#grant-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const res = await grantAction("/api/grants", {
+    title: $("#g-title").value,
+    summary: $("#g-summary").value,
+    goal: Number($("#g-goal").value) * T,
+  }, "Request sent. It goes public once an admin approves it.");
+  if (res !== true) return setMsg("#g-msg", res, "bad");
+  $("#g-title").value = "";
+  $("#g-summary").value = "";
+  $("#g-request").hidden = true;
+});
+
+$("#auth-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const email = $("#auth-email").value.trim();
+  const password = $("#auth-password").value;
+  const name = $("#auth-name").value.trim();
+  if (!email || !password) return setMsg("#auth-msg", "Email and password are required.", "bad");
+  if (state.authMode === "register" && !name) return setMsg("#auth-msg", "Give the account a name.", "bad");
+  return withBusy("auth", $("#auth-submit"), "Working…", async () => {
+    const path = state.authMode === "register" ? "/api/coord/auth/register" : "/api/coord/auth/login";
+    const body = { email, password };
+    if (state.authMode === "register") body.name = name;
+    const r = await post(path, body);
+    if (r.token) await saveSettings({ session_token: r.token });
+    state.user = r.user || null;
+    await loadAuth();
+    if (state.user && !state.user.accepted_terms) {
+      try {
+        const t = await api("/api/coord/auth/terms");
+        state.terms = (t && t.text) || "";
+      } catch { state.terms = ""; }
+    }
+    setMsg("#auth-msg", "", "");
+    toast(state.authMode === "register" ? "Account created." : "Signed in.");
+    loadGrants();
+  });
+});
+
+poll();
+loadGrants();
+window.setInterval(poll, 2000);

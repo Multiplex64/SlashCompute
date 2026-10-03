@@ -112,15 +112,44 @@ def mount_community(app, core: Coordinator) -> None:
         try:
             user = core.auth.update_profile(
                 user, name=body.get("name"), grant_split=body.get("grant_split"),
+                bio=body.get("bio"),
             )
         except AuthError as e:
             _raise(e)
         return {"user": core.auth.public_view(user)}
 
+    @r.get("/auth/me/nodes")
+    def my_nodes(request: Request, authorization: Optional[str] = Header(default=None)):
+        user = require(request, authorization)
+        live = {n.node_id: n for n in core.registry.nodes.values()}
+        out = []
+        for row in core.credits.nodes_for(user.id):
+            n = live.get(row.node_id)
+            out.append({
+                "node_id": row.node_id,
+                "user_id": n.user_id if n is not None and n.user_id else row.user_id,
+                "online": n is not None,
+                "status": n.status if n is not None else None,
+                "gpu_percent": n.gpu_percent if n is not None else None,
+            })
+        return out
+
     @r.get("/credits/me")
     def credits_me(request: Request, authorization: Optional[str] = Header(default=None)):
         user = require(request, authorization)
         return core.credits.summary(user.id)
+
+    @r.get("/credits/transactions")
+    def transactions(request: Request, limit: int = 50, before_id: Optional[int] = None,
+                     authorization: Optional[str] = Header(default=None)):
+        user = require(request, authorization)
+        return core.credits.list_txns(user.id, limit=limit, before_id=before_id)
+
+    @r.get("/credits/live")
+    def live(request: Request, window_s: float = 60,
+             authorization: Optional[str] = Header(default=None)):
+        user = require(request, authorization)
+        return core.credits.live(user.id, window_s=window_s)
 
     @r.get("/community/leaderboard")
     def leaderboard():
@@ -181,14 +210,15 @@ def mount_community(app, core: Coordinator) -> None:
             c = core.grants.comment(user, grant_id, body.get("body", ""))
         except GrantError as e:
             _raise(e)
-        return {"ok": True, "created_at": c.created_at}
+        return {"ok": True, "id": c.id, "created_at": c.created_at}
 
     @r.post("/admin/grants/{grant_id}/review")
     def review(grant_id: str, body: dict, request: Request,
                authorization: Optional[str] = Header(default=None)):
         admin = require(request, authorization)
         try:
-            g = core.grants.review(admin, grant_id, bool(body.get("approve")))
+            g = core.grants.review(admin, grant_id, bool(body.get("approve")),
+                                  note=body.get("note"))
         except GrantError as e:
             _raise(e)
         return core.grants.view(g, names())
@@ -225,5 +255,12 @@ def mount_community(app, core: Coordinator) -> None:
         with core.db.session() as s:
             rows = s.exec(select(User)).all()
         return [core.auth.public_view(u) for u in rows]
+
+    @r.get("/admin/flags")
+    def flags(request: Request, authorization: Optional[str] = Header(default=None)):
+        admin = require(request, authorization)
+        if not admin.admin:
+            raise HTTPException(403, "Admin only.")
+        return core.grants.list_flags()
 
     app.include_router(r)

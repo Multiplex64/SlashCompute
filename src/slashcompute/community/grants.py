@@ -8,7 +8,7 @@ from typing import Optional
 from sqlmodel import select
 
 from slashcompute.community.credits import Credits
-from slashcompute.coordinator.db import Database, Grant, GrantComment, User, UserFlag
+from slashcompute.coordinator.db import Database, Grant, GrantComment, User, UserFlag, now
 
 
 class GrantError(Exception):
@@ -48,13 +48,17 @@ class Grants:
             raise GrantError("Grant not found.", 404)
         return g
 
-    def review(self, admin: User, grant_id: str, approve: bool) -> Grant:
+    def review(self, admin: User, grant_id: str, approve: bool,
+               note: Optional[str] = None) -> Grant:
         if not admin.admin:
             raise GrantError("Admin only.", 403)
         g = self.get(grant_id)
         if g.status != "pending":
             raise GrantError("This grant was already reviewed.")
         g.status = "approved" if approve else "declined"
+        g.reviewed_at = now()
+        g.reviewed_by = admin.id
+        g.review_note = (note or "").strip()[:500] or None
         self.db.save(g)
         return g
 
@@ -123,6 +127,17 @@ class Grants:
         self.db.add(row)
         return row
 
+    def list_flags(self) -> list[dict]:
+        with self.db.session() as s:
+            rows = list(s.exec(select(UserFlag).order_by(UserFlag.created_at.desc())).all())
+        return [
+            {
+                "id": r.id, "user_id": r.user_id, "admin_id": r.admin_id,
+                "reason": r.reason, "created_at": r.created_at,
+            }
+            for r in rows
+        ]
+
     def view(self, g: Grant, names: Optional[dict[str, str]] = None) -> dict:
         names = names or {}
         return {
@@ -133,4 +148,6 @@ class Grants:
             "created_at": g.created_at, "progress": (
                 g.received_flops / g.goal_flops if g.goal_flops else 0.0
             ),
+            "reviewed_at": g.reviewed_at, "reviewed_by": g.reviewed_by,
+            "review_note": g.review_note,
         }

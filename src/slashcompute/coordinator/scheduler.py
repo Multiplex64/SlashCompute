@@ -57,6 +57,7 @@ class JobRuntime:
     # (epoch, step) -> {stage_idx: (in_digest, out_digest, node_id)}
     digests: dict[tuple[int, int], dict[int, tuple[str, str, str]]] = field(default_factory=dict)
     wait_reason: Optional[str] = None
+    last_step_flops: Optional[float] = None
 
     @property
     def id(self) -> str:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from dataclasses import asdict
 from pathlib import Path
 from typing import Optional
@@ -12,14 +13,18 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
+from slashcompute.common.config import DEMO_MODEL_CANDIDATES, DEV_MODEL
 from slashcompute.launcher.controller import (
     FINISHES, Launcher, LauncherError, LauncherSettings,
 )
+from slashcompute.launcher.dashboard import PoolData, node_flops, overview, split_credits
+from slashcompute.web import sample_grants
 
 STATIC = Path(__file__).resolve().parent / "static"
 SHELL_HOST = os.environ.get("SLASHCOMPUTE_SHELL_HOST", "127.0.0.1")
 SHELL_PORT = int(os.environ.get("SLASHCOMPUTE_SHELL_PORT", "8766"))
-SHELL_GENERATION = 2
+SHELL_GENERATION = 3
+MODELS = [DEV_MODEL, *DEMO_MODEL_CANDIDATES]
 _PROXY_BLOCK = {"verify"}
 
 
@@ -39,6 +44,8 @@ def create_shell(launcher: Optional[Launcher] = None) -> FastAPI:
     launch = launcher or Launcher()
     app = FastAPI(title="/compute")
     app.state.launcher = launch
+    app.state.grants = sample_grants.sample_book()
+    grants_lock = threading.Lock()
 
     @app.get("/")
     def index():
@@ -80,6 +87,69 @@ def create_shell(launcher: Optional[Launcher] = None) -> FastAPI:
     @app.post("/api/stop")
     def stop():
         return asdict(launch.stop())
+
+    @app.post("/api/stop-agent")
+    def stop_agent():
+        return asdict(launch.stop_agent())
+
+    @app.get("/api/overview")
+    def get_overview():
+        """Status, pool, this Mac and the leaderboard in one poll."""
+        s = launch.load_settings()
+        snap = launch.snapshot(s)
+        pool = launch.fetch_pool(launch.proxy_url(s)) if snap.coordinator_up else PoolData()
+        status = {**asdict(snap), **asdict(s), "coordinator_url": launch.coordinator_url(s),
+                  "models": MODELS}
+        return overview(status, pool, launch.my_node_id(), s.grant_split)
+
+    # ------------------------------------------------------------ sample grants
+
+    def grant_share() -> float:
+        """This Mac's FLOPs pledged to grants by its credit split."""
+        s = launch.load_settings()
+        pool = launch.fetch_pool(launch.proxy_url(s))
+        return split_credits(node_flops(pool.ledger, launch.my_node_id()),
+                             s.grant_split)["to_grants"]
+
+    def grant_board(sort: str = "top") -> dict:
+        mode = sort if sort in sample_grants.SORTS else "top"
+        return sample_grants.board(app.state.grants, mode, grant_share())
+
+    def change_grants(fn) -> None:
+        with grants_lock:
+            try:
+                app.state.grants = fn(app.state.grants)
+            except sample_grants.GrantError as e:
+                raise HTTPException(400, str(e)) from e
+
+    def amount(value) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "Enter a number.") from None
+
+    @app.get("/api/grants")
+    def list_grants(sort: str = "top"):
+        return grant_board(sort)
+
+    @app.post("/api/grants")
+    def request_grant(body: dict):
+        goal = amount(body.get("goal"))
+        change_grants(lambda b: sample_grants.request(
+            b, str(body.get("title", "")), str(body.get("summary", "")), goal))
+        return grant_board(str(body.get("sort", "top")))
+
+    @app.post("/api/grants/{grant_id}/fund")
+    def fund_grant(grant_id: str, body: dict):
+        flops, share = amount(body.get("amount")), grant_share()
+        change_grants(lambda b: sample_grants.fund(
+            b, grant_id, flops, sample_grants.available(b, share)))
+        return grant_board(str(body.get("sort", "top")))
+
+    @app.post("/api/grants/{grant_id}/review")
+    def review_grant(grant_id: str, body: dict):
+        change_grants(lambda b: sample_grants.review(b, grant_id, bool(body.get("approve"))))
+        return grant_board(str(body.get("sort", "top")))
 
     @app.post("/api/discover")
     def discover():

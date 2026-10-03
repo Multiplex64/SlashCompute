@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en" data-ink="carbon">
+<html lang="en" data-ink="signal">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -7,75 +7,267 @@
   <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
-  <!--
-    THESIS: /compute is a light table — stone, code, and hard-stop ink share one field. Not a poster beside a generic editor.
-    OWN-WORLD: Archivo Black title; Martian Mono everywhere else; carbon/paper structure; ink only as hard stops; square chrome except two circles.
-    STORY: Host or join a pool, lend GPU time, submit a LoRA, read FLOPs.
-    FIRST VIEWPORT: stacked / COMPUTE, ringed column on the field, code slab as the product, circular file badges, five-finish rail.
-    FORM: Dark Brutalism specimen field, user-pinned.
-    FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review.
-  -->
   <div class="grain" aria-hidden="true"></div>
-  <div class="wipe" id="wipe" hidden></div>
 
-  <div class="table">
-    <div class="stage">
-      <section class="field-col">
-        <h1 class="title"><span>/</span><span>COMPUTE</span></h1>
-        <figure class="mass" aria-hidden="true">
-          <svg class="column" viewBox="0 0 320 420" role="img">
-            <title>Synthetic ringed column (not a photograph)</title>
-            <rect class="plinth-a" x="48" y="348" width="32" height="32"/>
-            <rect class="plinth-b" x="80" y="348" width="32" height="32"/>
-            <rect class="plinth-b" x="112" y="348" width="32" height="32"/>
-            <rect class="plinth-a" x="144" y="348" width="32" height="32"/>
-            <rect class="plinth-b" x="176" y="348" width="32" height="32"/>
-            <rect class="plinth-a" x="208" y="348" width="32" height="32"/>
-            <rect class="plinth-b" x="240" y="348" width="32" height="32"/>
-            <rect class="plinth-a" x="80" y="380" width="32" height="32"/>
-            <rect class="plinth-b" x="112" y="380" width="32" height="32"/>
-            <rect class="plinth-a" x="144" y="380" width="32" height="32"/>
-            <rect class="plinth-b" x="176" y="380" width="32" height="32"/>
-            <rect class="plinth-a" x="208" y="380" width="32" height="32"/>
-            <ellipse class="stone" cx="160" cy="340" rx="78" ry="16"/>
-            <rect class="stone" x="92" y="86" width="136" height="254"/>
-            <ellipse class="stone" cx="160" cy="86" rx="68" ry="18"/>
-            <ellipse class="ring" cx="160" cy="128" rx="86" ry="20"/>
-            <ellipse class="hole" cx="160" cy="128" rx="62" ry="12"/>
-            <ellipse class="ring" cx="160" cy="196" rx="90" ry="22"/>
-            <ellipse class="hole" cx="160" cy="196" rx="64" ry="13"/>
-            <ellipse class="ring" cx="160" cy="268" rx="86" ry="20"/>
-            <ellipse class="hole" cx="160" cy="268" rx="62" ry="12"/>
-            <ellipse class="cap" cx="160" cy="58" rx="42" ry="28"/>
-            <rect class="rod" x="154" y="18" width="12" height="44"/>
-          </svg>
-          <div class="contact"></div>
-        </figure>
-      </section>
+  <div class="app">
+    <aside class="side">
+      <div class="brand"><span class="slash">/</span>COMPUTE</div>
+      <p class="tagline">Pooled Macs for everyone</p>
 
-      <section class="slab" aria-label="Engine">
-        <header class="slab-head">
-          <div class="badges" role="tablist" aria-label="File">
-            <button class="badge is-on" data-file="contribute" role="tab" aria-selected="true">CTR</button>
-            <button class="badge" data-file="take" role="tab" aria-selected="false">TAK</button>
-            <button class="badge" data-file="ledger" role="tab" aria-selected="false">LDG</button>
+      <nav class="nav" role="tablist" aria-label="Sections">
+        <button class="nav-item is-on" data-tab="contributions" role="tab"><span class="num">01</span>Contributions</button>
+        <button class="nav-item" data-tab="usage" role="tab"><span class="num">02</span>Usage</button>
+        <button class="nav-item" data-tab="grants" role="tab"><span class="num">03</span>Grants</button>
+        <button class="nav-item" data-tab="pool" role="tab"><span class="num">04</span>Pool</button>
+      </nav>
+
+      <div class="side-status">
+        <div class="side-row"><i class="sq" id="side-dot"></i><b id="side-title">Offline</b></div>
+        <p id="side-sub">No pool running</p>
+        <span class="tag ok" id="side-agent" hidden></span>
+      </div>
+    </aside>
+
+    <main class="main" id="main">
+      <!-- ============================================================ CONTRIBUTIONS -->
+      <section class="view is-on" id="view-contributions">
+        <header class="view-head">
+          <div>
+            <h1>Contributions</h1>
+            <p>Lend part of this Mac to the pool and earn FLOP credits for the work it does.</p>
           </div>
-          <div class="index" id="index" title="Macs in pool">0</div>
+          <span class="tag" id="c-pill">Not contributing</span>
         </header>
-        <p class="file" id="filename">CONTRIBUTE.sc</p>
-        <div class="code" id="code"></div>
-      </section>
-    </div>
 
-    <nav class="rail" aria-label="Finish">
-      <button class="seg is-on" data-ink="carbon"><i></i><span>CARBON</span></button>
-      <button class="seg" data-ink="poster"><i></i><span>POSTER</span></button>
-      <button class="seg" data-ink="signal"><i></i><span>SIGNAL</span></button>
-      <button class="seg" data-ink="thermal"><i></i><span>THERMAL</span></button>
-      <button class="seg" data-ink="void"><i></i><span>VOID</span></button>
-    </nav>
+        <div class="grid tiles">
+          <article class="card tile">
+            <label>FLOPs given</label>
+            <strong id="c-flops">0</strong>
+            <small id="c-flops-sub"></small>
+            <svg class="spark" id="c-spark" viewBox="0 0 200 40" preserveAspectRatio="none" aria-hidden="true"></svg>
+          </article>
+          <article class="card tile">
+            <label>Credits earned</label>
+            <strong id="c-earned">0</strong>
+            <small id="c-earned-sub"></small>
+          </article>
+          <article class="card tile">
+            <label>To grants</label>
+            <strong class="hot" id="c-grants">0</strong>
+            <small id="c-grants-sub"></small>
+          </article>
+          <article class="card tile">
+            <label>Your rank</label>
+            <strong id="c-rank">—</strong>
+            <small id="c-rank-sub"></small>
+          </article>
+        </div>
+
+        <div class="grid two">
+          <article class="card">
+            <header class="card-head"><h2>Contribute this Mac</h2></header>
+            <div class="state"><i class="sq" id="c-dot"></i><b id="c-state">Not contributing</b></div>
+            <p class="muted" id="c-detail"></p>
+            <div class="field">
+              <div class="field-head"><label for="gpu">GPU share</label><output id="gpu-out">50%</output></div>
+              <input type="range" id="gpu" min="1" max="100" value="50">
+              <p class="hint" id="gpu-hint"></p>
+            </div>
+            <button type="button" class="btn primary block" id="c-toggle" data-act="toggle-contribute">Start contributing</button>
+          </article>
+
+          <article class="card">
+            <header class="card-head"><h2>Credit split</h2></header>
+            <p class="muted">Choose how much of what you earn goes to community grants.</p>
+            <div class="split">
+              <div><label>To grants</label><strong class="hot" id="split-grants">0%</strong><small id="split-grants-amt"></small></div>
+              <div class="right"><label>You keep</label><strong class="sig" id="split-keep">100%</strong><small id="split-keep-amt"></small></div>
+            </div>
+            <input type="range" class="split-range" id="split" min="0" max="100" value="0" aria-label="Share of credits given to grants">
+            <p class="hint">Credits are 1:1 with FLOPs. These are estimates from the pool's ledger until accounts return.</p>
+          </article>
+        </div>
+
+        <div class="grid two">
+          <article class="card">
+            <header class="card-head"><h2>This Mac</h2></header>
+            <div id="c-mac"></div>
+          </article>
+          <article class="card">
+            <header class="card-head"><h2>How contributing works</h2></header>
+            <ul class="terms">
+              <li>Runs in the background at the GPU share you choose, only while contributing is on.</li>
+              <li>Only predefined job types run. Nobody can send your Mac arbitrary code.</li>
+              <li>Every step is metered in FLOPs and spot-checked by other Macs. Disputed work earns nothing.</li>
+              <li>Stop whenever you like. The current step finishes, then your Mac is released.</li>
+            </ul>
+          </article>
+        </div>
+      </section>
+
+      <!-- ============================================================ USAGE -->
+      <section class="view" id="view-usage">
+        <header class="view-head">
+          <div>
+            <h1>Usage</h1>
+            <p>Run fine-tunes on the pooled supercomputer, with more memory than any one Mac.</p>
+          </div>
+          <span class="tag ok" id="u-pill"></span>
+        </header>
+
+        <div class="grid tiles">
+          <article class="card tile"><label>Macs online</label><strong id="u-macs">0</strong><small id="u-macs-sub"></small></article>
+          <article class="card tile"><label>Compute</label><strong id="u-tflops">0</strong><small>TFLOPS pooled</small></article>
+          <article class="card tile"><label>Memory</label><strong id="u-mem">0</strong><small>unified memory pooled</small></article>
+          <article class="card tile"><label>Jobs</label><strong id="u-jobs">0</strong><small id="u-jobs-sub"></small></article>
+        </div>
+
+        <div class="grid split-2-3">
+          <article class="card">
+            <header class="card-head"><h2>New fine-tune</h2></header>
+            <p class="muted">Train a LoRA adapter across the pool. Your dataset uploads to the coordinator.</p>
+            <form id="job-form" novalidate>
+              <div class="field"><label for="model">Model</label><select id="model"></select></div>
+              <div class="field">
+                <label>Dataset (.jsonl)</label>
+                <div class="file-row">
+                  <label class="btn ghost sm">Choose file<input type="file" id="dataset" accept=".jsonl,application/jsonl,text/plain" hidden></label>
+                  <span class="muted" id="dataset-name">No file chosen</span>
+                </div>
+                <p class="hint">One JSON object per line: {"text": …} or {"prompt": …, "completion": …}.</p>
+              </div>
+              <div class="field-pair">
+                <div class="field"><label for="steps">Steps</label><input type="number" id="steps" min="1" value="10"></div>
+                <div class="field"><label for="min_stages">Min Macs</label><input type="number" id="min_stages" min="1" max="16" value="2"></div>
+              </div>
+              <p class="msg" id="job-msg"></p>
+              <button type="submit" class="btn primary block" id="job-submit">Submit job</button>
+              <button type="button" class="btn ghost sm" data-tab="pool" id="u-open-pool" hidden>Open Pool</button>
+            </form>
+          </article>
+
+          <article class="card">
+            <header class="card-head"><h2>Jobs</h2><span class="tag" id="u-count">0</span></header>
+            <div class="list" id="jobs"></div>
+          </article>
+        </div>
+      </section>
+
+      <!-- ============================================================ GRANTS -->
+      <section class="view" id="view-grants">
+        <header class="view-head">
+          <div>
+            <h1>Grants</h1>
+            <p>Community requests for compute. Back a project with your grant credits, or ask for help with yours.</p>
+          </div>
+          <span class="tag hot">Sample data</span>
+        </header>
+
+        <div class="toolbar">
+          <div class="seg" id="g-sort" role="tablist" aria-label="Sort grants">
+            <button type="button" data-sort="top" class="is-on">Top</button>
+            <button type="button" data-sort="trending">Trending</button>
+            <button type="button" data-sort="least">Least funded</button>
+          </div>
+          <div class="toolbar-right">
+            <button type="button" class="btn ghost dark" id="g-admin" data-act="toggle-admin">Admin view</button>
+            <button type="button" class="btn primary" data-act="toggle-request">Request a grant</button>
+          </div>
+        </div>
+
+        <div class="grid three">
+          <article class="card tile"><label>Your grant credits</label><strong class="hot" id="g-avail">0</strong><small id="g-avail-sub"></small></article>
+          <article class="card tile"><label>You've pledged</label><strong id="g-pledged">0</strong><small>across all grants</small></article>
+          <article class="card tile"><label>Open grants</label><strong id="g-open">0</strong><small id="g-open-sub"></small></article>
+        </div>
+
+        <article class="card form-card" id="g-request" hidden>
+          <header class="card-head"><h2>Request a grant</h2></header>
+          <p class="muted">Describe what the compute is for. An admin reviews every request before it goes public.</p>
+          <form id="grant-form" novalidate>
+            <div class="field"><label for="g-title">Title</label><input type="text" id="g-title" maxlength="80"></div>
+            <div class="field"><label for="g-summary">What it's for</label><textarea id="g-summary" rows="3" maxlength="400"></textarea></div>
+            <div class="field narrow"><label for="g-goal">Goal (TFLOPs)</label><input type="number" id="g-goal" min="1" value="300"></div>
+            <p class="msg" id="g-msg"></p>
+            <div class="btn-row">
+              <button type="submit" class="btn primary">Submit for review</button>
+              <button type="button" class="btn ghost" data-act="toggle-request">Cancel</button>
+            </div>
+          </form>
+        </article>
+
+        <article class="card" id="g-review" hidden>
+          <header class="card-head"><h2>Waiting for review</h2><span class="tag hot" id="g-review-count">0</span></header>
+          <div class="list" id="g-pending"></div>
+        </article>
+
+        <div class="grid split-3-2 top">
+          <div class="stack" id="g-list"></div>
+          <article class="card">
+            <header class="card-head"><h2>Top contributors</h2></header>
+            <p class="muted">Macs ranked by FLOPs given to the pool. Live from the ledger.</p>
+            <ol class="leaders" id="leaders"></ol>
+          </article>
+        </div>
+      </section>
+
+      <!-- ============================================================ POOL -->
+      <section class="view" id="view-pool">
+        <header class="view-head">
+          <div>
+            <h1>Pool</h1>
+            <p>Host a pool on this Mac, or join one already running on your network.</p>
+          </div>
+          <div class="seg" id="p-mode" role="tablist" aria-label="Pool mode">
+            <button type="button" data-mode="host">Host pool</button>
+            <button type="button" data-mode="join">Join pool</button>
+          </div>
+        </header>
+
+        <div class="banner" id="p-banner" hidden></div>
+
+        <div class="grid two">
+          <article class="card" id="p-host">
+            <header class="card-head"><h2>Host a pool</h2></header>
+            <p class="muted">This Mac runs the coordinator. Other Macs join with the address below.</p>
+            <div class="field">
+              <label>This Mac's address</label>
+              <div class="addr"><code id="p-ip">—</code><button type="button" class="btn ghost sm" id="p-copy" data-act="copy-ip">Copy</button></div>
+            </div>
+            <div class="btn-row">
+              <button type="button" class="btn primary grow" id="p-start" data-act="host">Start hosting</button>
+              <button type="button" class="btn ghost" id="p-stop" data-act="stop-pool">Stop pool</button>
+            </div>
+            <p class="hint">Closing this window leaves the pool running.</p>
+          </article>
+
+          <article class="card" id="p-join" hidden>
+            <header class="card-head"><h2>Join a pool</h2></header>
+            <p class="muted">Connect to a coordinator on your network.</p>
+            <div class="field"><label for="url">Coordinator address</label><input type="text" id="url" placeholder="192.168.1.10:8765" spellcheck="false" autocomplete="off"></div>
+            <div class="btn-row">
+              <button type="button" class="btn primary grow" id="p-connect" data-act="connect">Connect</button>
+              <button type="button" class="btn ghost" id="p-find" data-act="discover">Find on LAN</button>
+            </div>
+            <p class="hint">Once connected, start contributing from the Contributions tab.</p>
+          </article>
+
+          <article class="card">
+            <header class="card-head"><h2>Status</h2></header>
+            <dl class="status" id="p-status"></dl>
+          </article>
+        </div>
+
+        <article class="card">
+          <header class="card-head"><h2>Macs in pool</h2><span class="tag" id="p-count">0</span></header>
+          <div id="p-macs"></div>
+        </article>
+        <p class="foot" id="p-hint"></p>
+      </section>
+    </main>
   </div>
 
+  <div class="toast" id="toast" role="status" hidden><i></i><span></span></div>
   <script src="/static/app.js"></script>
 </body>
 </html>

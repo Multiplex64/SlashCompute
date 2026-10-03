@@ -231,3 +231,30 @@ def test_snapshot_reads_health_and_agent_status(tmp_path, monkeypatch):
     assert snap.agent_running is True
     assert snap.agent_status == "idle"
     assert snap.lan_ip == "192.168.9.9"
+
+
+def test_stop_agent_leaves_coordinator_running(tmp_path, monkeypatch):
+    kills: list[tuple[int, int]] = []
+    monkeypatch.setattr("os.kill", lambda pid, sig: kills.append((pid, sig)))
+    monkeypatch.setattr("slashcompute.agent.daemon._alive", lambda pid: True)
+    launcher = _launcher(tmp_path)
+    (tmp_path / "coordinator.pid").write_text("111\n")
+    (tmp_path / "agent" / "agent.pid").write_text("222\n")
+    launcher.stop_agent()
+    assert (222, signal.SIGTERM) in kills
+    assert (111, signal.SIGTERM) not in kills  # only liveness probes (signal 0)
+
+
+def test_my_node_id_never_creates_one(tmp_path):
+    launcher = _launcher(tmp_path)
+    assert launcher.my_node_id() is None
+    assert not launcher.paths.node_id_file.exists()
+    launcher.paths.node_id_file.write_text("abc123\n")
+    assert launcher.my_node_id() == "abc123"
+
+
+def test_fetch_pool_down_and_partial(tmp_path):
+    assert _launcher(tmp_path, http=FakeHTTP(None)).fetch_pool("http://x:8765").online is False
+    # Health answers but list endpoints return a dict: tolerated as empty lists.
+    pool = _launcher(tmp_path, http=FakeHTTP({"ok": True})).fetch_pool("http://x:8765")
+    assert pool.online is True and (pool.nodes, pool.jobs, pool.ledger) == ([], [], [])

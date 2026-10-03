@@ -31,7 +31,12 @@ From this repo you can also run:
 uv run slashcompute
 ```
 
-On the host Mac: **CTR** → HOST → START. Copy the LAN address. On the others: JOIN, paste that address or FIND_ON_LAN, START. Submit a fine-tune from **TAK** (JSONL on the host). **LDG** is raw FLOPs.
+The window has four sections in the sidebar:
+
+- **Pool**: on the host Mac pick **Host pool** → **Start hosting** and copy the LAN address. On the others pick **Join pool**, paste that address or press **Find on LAN**, then **Connect**.
+- **Contributions**: set the GPU share and the credit split (kept vs. given to grants), then **Start contributing**. Shows FLOPs given, estimated credits (1:1 with FLOPs) and your rank.
+- **Usage**: submit a LoRA fine-tune (the JSONL is uploaded from this Mac) and follow, or cancel, jobs live.
+- **Grants**: browse, fund and request community grants, with an admin review queue and a live contributor leaderboard. Grants are sample data until accounts return.
 
 The rest of this README is the terminal equivalent.
 

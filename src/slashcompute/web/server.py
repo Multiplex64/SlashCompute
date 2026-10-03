@@ -10,8 +10,9 @@ from typing import Optional
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.background import BackgroundTask
 
 from slashcompute.common.config import DEMO_MODEL_CANDIDATES, DEV_MODEL
 from slashcompute.launcher.controller import (
@@ -22,10 +23,12 @@ from slashcompute.launcher.dashboard import PoolData, overview
 STATIC = Path(__file__).resolve().parent / "static"
 SHELL_HOST = os.environ.get("SLASHCOMPUTE_SHELL_HOST", "127.0.0.1")
 SHELL_PORT = int(os.environ.get("SLASHCOMPUTE_SHELL_PORT", "8766"))
-SHELL_GENERATION = 5
+SHELL_GENERATION = 6
 MODELS = [DEV_MODEL, *DEMO_MODEL_CANDIDATES]
 _PROXY_BLOCK = {"verify"}
 _SORTS = ("top", "trending", "least")
+# Forming an LLM pipeline (loading weights over RPC) can take minutes before the first token.
+STREAM_TIMEOUT = httpx.Timeout(None, connect=5.0)
 
 
 def _proxy_blocked(path: str) -> bool:
@@ -48,6 +51,12 @@ def settings_from_body(body: dict) -> LauncherSettings:
         finish=body.get("finish", "carbon"),
         session_token=body.get("session_token", ""),
         grant_split=body.get("grant_split", 0),
+        training=body.get("training", True),
+        inference=body.get("inference", False),
+        inference_memory_gb=body.get("inference_memory_gb", 0),
+        inference_head=body.get("inference_head", True),
+        models_dir=body.get("models_dir", "~/models"),
+        transport=body.get("transport", "direct"),
     ).clamp()
 
 
@@ -57,6 +66,8 @@ def _forward_headers(request: Request) -> dict[str, str]:
         headers["authorization"] = request.headers["authorization"]
     if request.headers.get("cookie"):
         headers["cookie"] = request.headers["cookie"]
+    if token := os.environ.get("SLASHCOMPUTE_INF_TOKEN"):
+        headers["x-inference-token"] = token   # internet-facing pools: shared secret for LLM routes
     return headers
 
 
@@ -123,10 +134,48 @@ def _empty_board() -> dict:
     }
 
 
-def create_shell(launcher: Optional[Launcher] = None) -> FastAPI:
+def create_shell(launcher: Optional[Launcher] = None,
+                 stream_client: Optional[httpx.AsyncClient] = None) -> FastAPI:
     launch = launcher or Launcher()
     app = FastAPI(title="/compute")
     app.state.launcher = launch
+    streams = stream_client or httpx.AsyncClient(timeout=STREAM_TIMEOUT)
+
+    def coord_base() -> str:
+        base = launch.proxy_url()
+        if not base:
+            raise HTTPException(503, "No coordinator URL. Host or enter one, then Start.")
+        return base.rstrip("/")
+
+    async def relay_stream(req: httpx.Request) -> Response:
+        """Pass a coordinator response through as it arrives (LLM tokens, upload results)."""
+        try:
+            r = await streams.send(req, stream=True)
+        except httpx.RequestError as e:
+            raise HTTPException(502, f"Coordinator unreachable: {e}") from e
+        return StreamingResponse(r.aiter_bytes(), status_code=r.status_code,
+                                 media_type=r.headers.get("content-type", "application/json"),
+                                 background=BackgroundTask(r.aclose))
+
+    @app.post("/api/chat")
+    async def chat(request: Request):
+        """Streaming chat with the pool's LLMs (OpenAI-style SSE from the coordinator)."""
+        body = await request.json()
+        body["stream"] = True
+        req = streams.build_request("POST", f"{coord_base()}/v1/chat/completions", json=body,
+                                    headers=_forward_headers(request), timeout=STREAM_TIMEOUT)
+        return await relay_stream(req)
+
+    @app.post("/api/models/upload")
+    async def upload_model(request: Request):
+        """Stream a GGUF to the coordinator without holding it in memory."""
+        name = request.headers.get("x-filename", "")
+        headers = {**_forward_headers(request), "content-type": "application/octet-stream"}
+        if request.headers.get("content-length"):
+            headers["content-length"] = request.headers["content-length"]
+        req = streams.build_request("POST", f"{coord_base()}/inference/models/upload", params={"name": name},
+                                    content=request.stream(), headers=headers, timeout=STREAM_TIMEOUT)
+        return await relay_stream(req)
 
     @app.get("/")
     def index():
@@ -308,7 +357,7 @@ def create_shell(launcher: Optional[Launcher] = None) -> FastAPI:
         launch.save_settings(s)
         return {"url": found}
 
-    @app.api_route("/api/coord/{path:path}", methods=["GET", "POST", "PATCH"])
+    @app.api_route("/api/coord/{path:path}", methods=["GET", "POST", "PATCH", "DELETE"])
     async def proxy(path: str, request: Request):
         if _proxy_blocked(path):
             raise HTTPException(404, "not proxied")
@@ -316,13 +365,11 @@ def create_shell(launcher: Optional[Launcher] = None) -> FastAPI:
         if not base:
             raise HTTPException(503, "No coordinator URL. Host or enter one, then Start.")
         url = f"{base.rstrip('/')}/{path}"
-        headers = {}
-        if request.headers.get("authorization"):
-            headers["authorization"] = request.headers["authorization"]
-        if request.headers.get("cookie"):
-            headers["cookie"] = request.headers["cookie"]
+        headers = _forward_headers(request)
         try:
-            if request.method == "GET":
+            if request.method == "DELETE":
+                r = launch._http.delete(url, headers=headers or None, timeout=30.0)
+            elif request.method == "GET":
                 r = launch._http.get(url, params=dict(request.query_params),
                                      headers=headers or None, timeout=30.0)
             else:

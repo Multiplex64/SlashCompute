@@ -20,17 +20,25 @@ from slashcompute.common.config import EngineConfig
 from slashcompute.common.protocol import Register, dump, parse_agent_message
 from slashcompute.coordinator.core import MAX_DATASET_BYTES, Coordinator
 from slashcompute.coordinator.db import Verification
+from slashcompute.coordinator.inference_accounting import CoreAccounting
+from slashcompute.inference.config import InferenceSettings
+from slashcompute.inference.coordinator.service import InferenceService, mount
 from slashcompute.jobs import parse_spec
 
 log = logging.getLogger(__name__)
 
 
-def create_app(cfg: EngineConfig, advertise: bool = False) -> FastAPI:
+def create_app(cfg: EngineConfig, advertise: bool = False,
+               inference: Optional[InferenceSettings] = None) -> FastAPI:
     core = Coordinator(cfg)
+    inf = inference or InferenceSettings.from_env(
+        DB_PATH=str(cfg.home / "inference.sqlite3"), MODELS_DIR=str(cfg.home / "models"))
+    svc = InferenceService(inf, CoreAccounting(core))
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         core.start()
+        svc.start()
         adv = None
         if advertise:
             try:
@@ -42,10 +50,13 @@ def create_app(cfg: EngineConfig, advertise: bool = False) -> FastAPI:
         yield
         if adv:
             adv.close()
+        await svc.stop()
         await core.stop()
 
     app = FastAPI(title="/compute coordinator", lifespan=lifespan)
     app.state.core = core
+    app.state.inference = svc
+    mount(app, svc)
 
     @app.middleware("http")
     async def session_cookie(request: Request, call_next):
@@ -295,6 +306,7 @@ def create_app(cfg: EngineConfig, advertise: bool = False) -> FastAPI:
 
     @app.get("/health")
     async def health():
-        return {"ok": True, "nodes": len(core.registry.nodes), "jobs": len(core.jobs)}
+        return {"ok": True, "nodes": len(core.registry.nodes), "jobs": len(core.jobs),
+                "inference_nodes": len(svc.online), "inference_transport": svc.s.TRANSPORT}
 
     return app

@@ -104,6 +104,32 @@ uv run slashcompute-agent stop
 
 `--max-memory-gb` caps how much unified memory the node lends. `--no-sandbox` disables `sandbox-exec` around the worker (useful while debugging).
 
+## LLMs (chat with a model split across Macs)
+
+The **05 LLMs** tab chats with a GGUF model whose layers are split across the pool by llama.cpp RPC: `rpc-server` on workers, `llama-server` on one head Mac. It runs next to fine-tuning. When a Mac starts training, its LLM work drains and moves elsewhere.
+
+Each Mac that serves LLMs needs llama.cpp built with RPC:
+
+```bash
+brew install cmake
+./scripts/build_llama.sh
+```
+
+Then use the **Serve LLMs on this Mac** card (memory, models folder, head or worker) and press Start serving. Add models with **Upload GGUF**. The file is pushed to every head-capable Mac, or you can drop `.gguf` files into a head's models folder (default `~/models`). `./scripts/fetch_smoke_model.sh` grabs a tiny one.
+
+From the terminal:
+
+```bash
+uv run python -m slashcompute.inference.node start --url http://192.168.1.10:8765
+curl http://192.168.1.10:8765/v1/models
+```
+
+The coordinator also serves an OpenAI-compatible `POST /v1/chat/completions` (SSE streaming).
+
+- **Transport:** `direct` (default) has heads reach workers' RPC servers on the LAN. `relay` (`--inference-transport relay`, or the toggle on the host) tunnels RPC through the coordinator over WebSockets, so Macs anywhere can join with no open ports. Set `SLASHCOMPUTE_INF_TOKEN` on the coordinator and nodes when exposing it to the internet.
+- **Credits:** same FLOP book as training. Prompt tokens count at `2 × params` (plus attention) per token. Generated tokens are memory-bound, so they are weighted by prompt speed ÷ generation speed (clamped 1–50). An hour of serving then earns about what an hour of training does. Hosts are paid only what a signed-in chatter's reservation covers. Anonymous chats are free and still logged in the ledger.
+- **Tunables:** every setting can be overridden with `SLASHCOMPUTE_INF_<FIELD>` (see `src/slashcompute/inference/config.py`).
+
 ## Tests
 
 ```bash

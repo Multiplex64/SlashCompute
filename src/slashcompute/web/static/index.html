@@ -23,6 +23,7 @@
         <button class="nav-item" data-tab="usage" role="tab"><span class="num">02</span>Usage</button>
         <button class="nav-item" data-tab="grants" role="tab"><span class="num">03</span>Grants</button>
         <button class="nav-item" data-tab="pool" role="tab"><span class="num">04</span>Pool</button>
+        <button class="nav-item" data-tab="llm" role="tab"><span class="num">05</span>LLMs</button>
       </nav>
 
       <div class="side-account" id="acct">
@@ -294,6 +295,91 @@
           <div id="p-macs"></div>
         </article>
         <p class="foot" id="p-hint"></p>
+      </section>
+
+      <!-- ============================================================ LLMS -->
+      <section class="view" id="view-llm">
+        <header class="view-head">
+          <div>
+            <h1>LLMs</h1>
+            <p>Chat with a model too big for any one Mac. llama.cpp splits its layers across the pool.</p>
+          </div>
+          <span class="tag" id="l-pill">Offline</span>
+        </header>
+
+        <div class="grid tiles">
+          <article class="card tile"><label>Models</label><strong id="l-models">0</strong><small id="l-models-sub">ready to chat</small></article>
+          <article class="card tile"><label>Macs serving</label><strong id="l-nodes">0</strong><small id="l-nodes-sub">running llama.cpp</small></article>
+          <article class="card tile"><label>Speed</label><strong id="l-speed">—</strong><small id="l-speed-sub">tokens per second</small></article>
+          <article class="card tile"><label>Transport</label><strong id="l-transport">—</strong><small id="l-transport-sub"></small></article>
+        </div>
+
+        <div class="grid split-3-2">
+          <article class="card">
+            <header class="card-head"><h2>Chat</h2><span class="tag" id="l-chat-tag">Idle</span></header>
+            <div class="field"><label for="l-model">Model</label><select id="l-model"></select></div>
+            <div class="chat" id="l-log"></div>
+            <form id="chat-form" novalidate>
+              <div class="field"><label for="l-draft">Message</label>
+                <textarea id="l-draft" rows="3" placeholder="Ask the pool… (Enter sends, Shift+Enter for a new line)" spellcheck="false"></textarea>
+              </div>
+              <p class="msg" id="l-msg"></p>
+              <div class="btn-row">
+                <button type="submit" class="btn primary grow" id="l-send">Send</button>
+                <button type="button" class="btn ghost" id="l-stop" data-act="llm-stop" disabled>Stop</button>
+                <button type="button" class="btn ghost" data-act="llm-clear">Clear</button>
+              </div>
+              <p class="hint">Signed in: replies cost FLOP credits and pay the Macs that served them. The first message loads the model, which can take a minute.</p>
+            </form>
+          </article>
+
+          <article class="card">
+            <header class="card-head"><h2>Models</h2><span class="tag" id="l-count">0</span></header>
+            <div class="list" id="l-catalog"></div>
+            <div class="field">
+              <label>Add a model (.gguf)</label>
+              <div class="file-row">
+                <label class="btn ghost sm" id="l-pick">Upload GGUF<input type="file" id="l-file" accept=".gguf" hidden></label>
+                <span class="muted" id="l-file-name">Sent to every Mac that can head it</span>
+              </div>
+              <div class="bar" id="l-upbar" hidden><i></i></div>
+              <p class="msg" id="l-upmsg"></p>
+            </div>
+          </article>
+        </div>
+
+        <div class="grid two">
+          <article class="card">
+            <header class="card-head"><h2>Pipeline</h2><span class="tag" id="l-pipe-tag">None</span></header>
+            <div id="l-pipe"></div>
+          </article>
+
+          <article class="card">
+            <header class="card-head"><h2>Serve LLMs on this Mac</h2></header>
+            <div class="state"><i class="sq" id="l-dot"></i><b id="l-state">Not serving</b></div>
+            <p class="muted" id="l-detail"></p>
+            <div class="field-pair">
+              <div class="field"><label for="l-mem">Memory (GB)</label><input type="number" id="l-mem" min="0" max="1024" value="0"></div>
+              <div class="field"><label for="l-dir">Models folder</label><input type="text" id="l-dir" value="~/models" spellcheck="false" autocomplete="off"></div>
+            </div>
+            <div class="field">
+              <label>Role</label>
+              <div class="seg" id="l-role">
+                <button type="button" data-llm-head="1">Head or worker</button>
+                <button type="button" data-llm-head="0">Worker only</button>
+              </div>
+            </div>
+            <div class="field" id="l-transport-field">
+              <label>Transport (host)</label>
+              <div class="seg" id="l-transport-seg">
+                <button type="button" data-transport="direct">Direct · LAN</button>
+                <button type="button" data-transport="relay">Relay · internet</button>
+              </div>
+            </div>
+            <button type="button" class="btn primary block" id="l-toggle" data-act="toggle-llm">Start serving</button>
+            <p class="hint" id="l-hint">Memory 0 = automatic. Training on this Mac takes priority: LLM work pauses while a fine-tune runs here.</p>
+          </article>
+        </div>
       </section>
     </main>
   </div>

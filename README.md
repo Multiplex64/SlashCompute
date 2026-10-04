@@ -127,8 +127,16 @@ curl http://192.168.1.10:8765/v1/models
 The coordinator also serves an OpenAI-compatible `POST /v1/chat/completions` (SSE streaming).
 
 - **Transport:** `direct` (default) has heads reach workers' RPC servers on the LAN. `relay` (`--inference-transport relay`, or the toggle on the host) tunnels RPC through the coordinator over WebSockets, so Macs anywhere can join with no open ports. Set `SLASHCOMPUTE_INF_TOKEN` on the coordinator and nodes when exposing it to the internet.
-- **Credits:** same FLOP book as training. Prompt tokens count at `2 × params` (plus attention) per token. Generated tokens are memory-bound, so they are weighted by prompt speed ÷ generation speed (clamped 1–50). An hour of serving then earns about what an hour of training does. Hosts are paid only what a signed-in chatter's reservation covers. Anonymous chats are free and still logged in the ledger.
+- **Credits:** same FLOP book as training. Prompt tokens count at `2 × params` (plus attention) per token. Generated tokens are memory-bound, so they are weighted by prompt speed ÷ generation speed (clamped 1–50). An hour of serving then earns about what an hour of training does. Hosts are paid only what a signed-in chatter's reservation covers. Anonymous chats are free on LAN pools and still logged in the ledger. Public pools require an account session, accepted terms, and sufficient credits; the shared inference secret does not replace account authentication.
 - **Tunables:** every setting can be overridden with `SLASHCOMPUTE_INF_<FIELD>` (see `src/slashcompute/inference/config.py`).
+
+## Public-pool access
+
+With `SLASHCOMPUTE_PUBLIC_POOL=1`, only a job's owner or an administrator can cancel it or download its output adapter. Dataset and checkpoint downloads also allow authenticated contributors currently assigned to that job. Checkpoint uploads and verification transfers require the matching assignment. Agents use `--session-token` (or `SLASHCOMPUTE_SESSION`) for both registration and HTTP transfers, including sandboxed workers.
+
+Public users submit training datasets through `POST /jobs/upload` (the app's Usage form). Submitting coordinator-local dataset paths through `POST /jobs` is restricted to administrators. Temporary uploads are removed after submission, and rejected reservations discard their dataset copies.
+
+Changing the pool address, GPU share, or session restarts the training agent after it drains. If it is still stopping, the app reports that settings have not yet been applied; start again after the current work finishes. Existing agents without saved argument metadata rejoin once after upgrading.
 
 ## Tests
 

@@ -10,11 +10,13 @@ Base: GitHub main at c9d471f. Branch: codex/fix-public-pool-access.
 - [x] Add regression tests and verify authorized training/inference workflows still work.
 - [x] Run the relevant tests and full suite; compare any failure with the base commit.
 - [x] Review the final diff.
-- [ ] Commit, push, and create a PR targeting main.
+- [x] Commit, push, and create a PR targeting main.
 
 Implementation plan: keep access checks in the coordinator, pass session credentials through the existing agent HTTP client (including sandboxed workers), and preserve LAN compatibility. Compare effective launcher arguments rather than just the session token. Run focused tests first, then the full suite. The known base failure is tests/test_pipeline.py::test_pipeline_matches_single_stage_reference.
 
 ## Results
+
+PR: https://github.com/RizzyRoger/SlashCompute/pull/6 (base: main; head: darrenyoungblood12345-a11y:codex/fix-public-pool-access).
 
 Full suite: 268 passed, 1 failed in 65.17 seconds. The failure is the existing training-loss assertion at tests/test_pipeline.py:56 (6.274164438247681 is not below 6.087780237197876), reproduced on main before these changes. No pipeline code or existing pipeline tests changed.
 

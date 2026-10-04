@@ -46,7 +46,7 @@ class LauncherSettings:
     transport: str = "direct"          # host only: direct (LAN) or relay (internet, RPC via the coordinator)
 
     def clamp(self) -> "LauncherSettings":
-        mode = self.mode if self.mode in ("host", "join") else "host"
+        mode = self.mode if self.mode in ("host", "join", "public") else "host"
         finish = self.finish if self.finish in FINISHES else "carbon"
         transport = self.transport if self.transport in TRANSPORTS else "direct"
         try:
@@ -93,15 +93,19 @@ class StatusSnapshot:
 PopenFn = Callable[..., Any]
 
 
-def normalize_url(url: str, port: int = 8765) -> str:
+def normalize_url(url: str, port: int = 8765, scheme: str = "http") -> str:
     u = (url or "").strip()
     if not u:
         return ""
     if "://" not in u:
         if ":" not in u.split("/")[0]:
             u = f"{u}:{port}"
-        u = f"http://{u}"
+        u = f"{scheme}://{u}"
     return u.rstrip("/")
+
+
+def health_timeout(url: str) -> float:
+    return 5.0 if (url or "").lower().startswith("https://") else 1.0
 
 
 def process_alive(pid: int) -> bool:
@@ -181,7 +185,9 @@ class Launcher:
     def coordinator_url(self, settings: LauncherSettings) -> str:
         if settings.mode == "host":
             return f"http://{self._lan_ip()}:{self.cfg.coordinator_port}"
-        return normalize_url(settings.url, self.cfg.coordinator_port)
+        raw = settings.url or (self.cfg.public_url if settings.mode == "public" else "")
+        scheme = "https" if settings.mode == "public" else "http"
+        return normalize_url(raw, self.cfg.coordinator_port, scheme=scheme)
 
     def proxy_url(self, settings: Optional[LauncherSettings] = None) -> str:
         """Coordinator URL the local shell should dial (loopback when hosting)."""
@@ -289,7 +295,7 @@ class Launcher:
         if not url:
             return None
         try:
-            r = self._http.get(f"{url.rstrip('/')}/health", timeout=1.0)
+            r = self._http.get(f"{url.rstrip('/')}/health", timeout=health_timeout(url))
             if r.status_code == 200:
                 data = r.json()
                 return data if isinstance(data, dict) else {"ok": True}
@@ -317,6 +323,12 @@ class Launcher:
         if s.mode == "join" and not url:
             self.last_error = "Enter a coordinator URL, or find one on the LAN."
             raise LauncherError(self.last_error)
+        if s.mode == "public" and not url:
+            self.last_error = "Enter the public coordinator URL."
+            raise LauncherError(self.last_error)
+        if s.mode == "public" and not s.session_token:
+            self.last_error = "Sign in first."
+            raise LauncherError(self.last_error)
 
         want_coord = s.mode == "host"
         lend = s.mode == "join" or s.contribute
@@ -337,12 +349,12 @@ class Launcher:
             self._restart_coordinator(s)
 
         agent_url = self.proxy_url(s) if s.mode == "host" else url
+        if s.mode in ("join", "public") and not self.poll_health(url):
+            self.last_error = f"No coordinator at {url}."
+            raise LauncherError(self.last_error)
         if not want_agent and self._agent_running():
             request_stop(self.paths)
         if want_agent:
-            if s.mode == "join" and not self.poll_health(url):
-                self.last_error = f"No coordinator at {url}."
-                raise LauncherError(self.last_error)
             bound = self._bound_session()
             rebind = bool(s.session_token) and s.session_token != bound
             if self._agent_running() and rebind:

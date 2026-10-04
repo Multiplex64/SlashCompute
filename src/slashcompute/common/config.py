@@ -60,6 +60,10 @@ class EngineConfig:
 
     sandbox: bool = True
 
+    # Set on a hosted coordinator. Local LAN host leaves these alone.
+    public_pool: bool = False
+    public_url: str = ""
+
     @classmethod
     def from_env(cls, **overrides) -> "EngineConfig":
         cfg = cls()

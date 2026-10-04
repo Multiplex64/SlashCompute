@@ -116,8 +116,8 @@ def create_app(cfg: EngineConfig, advertise: bool = False,
             node_id = first.node_id
             try:
                 await core.on_register(first, send)
-            except PermissionError:
-                await ws.close(code=4003, reason="banned")
+            except PermissionError as e:
+                await ws.close(code=4003, reason=str(e)[:123] or "banned")
                 return
             while True:
                 raw = await ws.receive_text()
@@ -148,6 +148,8 @@ def create_app(cfg: EngineConfig, advertise: bool = False,
     async def submit_job(body: dict, request: Request,
                          authorization: Optional[str] = Header(default=None)):
         user = _user(request, authorization)
+        if core.cfg.public_pool and user is None:
+            raise HTTPException(401, "Sign in first.")
         if _token(request, authorization) and user is None:
             raise HTTPException(401, "Sign in first.")
         try:
@@ -187,13 +189,18 @@ def create_app(cfg: EngineConfig, advertise: bool = False,
             buf.extend(chunk)
         dest.write_bytes(bytes(buf))
         user = _user(request, authorization)
+        if core.cfg.public_pool and user is None:
+            raise HTTPException(401, "Sign in first.")
         if _token(request, authorization) and user is None:
             raise HTTPException(401, "Sign in first.")
+        if core.cfg.public_pool:
+            min_stages = 1
         try:
             spec = parse_spec({
                 "kind": "lora_finetune", "model": model, "dataset_path": str(dest),
                 "steps": steps, "min_stages": min_stages,
                 "batch_size": batch_size, "microbatches": microbatches,
+                **({"max_stages": 1} if core.cfg.public_pool else {}),
             })
             job = core.submit(spec)
         except (ValidationError, ValueError, FileNotFoundError) as e:

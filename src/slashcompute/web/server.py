@@ -229,7 +229,7 @@ def create_shell(launcher: Optional[Launcher] = None,
         snap = launch.snapshot(s)
         pool = launch.fetch_pool(launch.proxy_url(s)) if snap.coordinator_up else PoolData()
         status = {**asdict(snap), **asdict(s), "coordinator_url": launch.coordinator_url(s),
-                  "models": MODELS}
+                  "models": MODELS, "public_url": launch.cfg.public_url or ""}
         return overview(status, pool, launch.my_node_id(), s.grant_split)
 
     # ------------------------------------------------------------ live grants

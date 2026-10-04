@@ -126,6 +126,8 @@ class Coordinator:
     # ------------------------------------------------------------ jobs
 
     def submit(self, spec: LoraFinetuneSpec) -> JobRuntime:
+        if self.cfg.public_pool:
+            spec = spec.model_copy(update={"min_stages": 1, "max_stages": 1})
         if not allowed_model(spec.model):
             raise ValueError(f"model {spec.model!r} is not allowed.")
         src = safe_dataset_source(spec.dataset_path)
@@ -195,11 +197,23 @@ class Coordinator:
     # ------------------------------------------------------------ agent sessions
 
     async def on_register(self, msg: Register, send: SendFn) -> None:
+        public_user = None
+        if self.cfg.public_pool:
+            public_user = self.auth.session_user(msg.session_token) if msg.session_token else None
+            if public_user is None:
+                raise PermissionError("sign in")
+            if public_user.banned:
+                raise PermissionError("banned")
+            if public_user.accepted_terms_at is None:
+                raise PermissionError("accept terms")
         old = self.registry.get(msg.node_id)
         if old is not None:
             await self.recovery.on_node_lost(msg.node_id, "re-registered")
         state = self.registry.register(msg, send)
-        if msg.session_token:
+        if public_user is not None:
+            state.user_id = public_user.id
+            self.credits.bind_node(msg.node_id, public_user.id)
+        elif msg.session_token:
             user = self.auth.session_user(msg.session_token)
             if user is None:
                 log.warning("node %s presented a bad session token", msg.node_id[:8])

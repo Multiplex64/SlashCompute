@@ -370,7 +370,9 @@ function renderContributions() {
     setText("#c-state", `Contributing${job}`);
     setText("#c-detail", `Agent is ${st.agent_status || "running"}. Earning whenever the pool has work.`);
   } else {
-    const where = s.mode === "host" ? "hosted on this Mac" : (s.url || "no address set yet");
+    const where = s.mode === "host" ? "hosted on this Mac"
+      : s.mode === "public" ? (s.url || status().public_url || "public pool")
+      : (s.url || "no address set yet");
     setText("#c-state", "Not contributing");
     setText("#c-detail", `Start to lend this Mac to the pool (${where}). It runs in the background.`);
   }
@@ -429,6 +431,13 @@ function renderUsage() {
     ? `${withUnit(credits().balance)} available`
     : `≈ ${withUnit(credits().kept)} to spend`);
   $("#flop-budget").hidden = !signedIn();
+  const minMacs = $("#min_stages");
+  if ((state.settings || {}).mode === "public") {
+    minMacs.value = "1";
+    minMacs.disabled = true;
+  } else {
+    minMacs.disabled = false;
+  }
 
   const models = status().models || [];
   if (models.length && state.modelsShown !== models.join()) {
@@ -586,13 +595,17 @@ async function grantAction(path, body, okText) {
 function renderPool() {
   const st = status();
   const s = state.settings || {};
-  const host = s.mode !== "join";
-  $$("#p-mode button").forEach((b) => b.classList.toggle("is-on", b.dataset.mode === (host ? "host" : "join")));
-  $("#p-host").hidden = !host;
-  $("#p-join").hidden = host;
+  const mode = s.mode === "join" || s.mode === "public" ? s.mode : "host";
+  $$("#p-mode button").forEach((b) => b.classList.toggle("is-on", b.dataset.mode === mode));
+  $("#p-host").hidden = mode !== "host";
+  $("#p-join").hidden = mode !== "join";
+  $("#p-public").hidden = mode !== "public";
   setText("#p-ip", st.lan_ip || "—");
   const url = $("#url");
   if (document.activeElement !== url && url.value !== (s.url || "")) url.value = s.url || "";
+  const pub = $("#public-url");
+  const pubVal = s.url || st.public_url || "";
+  if (pub && document.activeElement !== pub && pub.value !== pubVal) pub.value = pubVal;
 
   const banner = $("#p-banner");
   banner.hidden = !st.last_error;
@@ -634,9 +647,11 @@ function renderPool() {
       }).join("")}</tbody></table>`
     : `<p class="empty">No Macs connected yet. Start contributing here, or have others join.</p>`);
 
-  setText("#p-hint", host
+  setText("#p-hint", mode === "host"
     ? "Firewall: allow incoming TCP 8765 on this Mac and 9700 on each contributing Mac."
-    : "Firewall: allow incoming TCP 9700 on this Mac so pipeline peers can reach it.");
+    : mode === "public"
+      ? "Each Take runs on one signed-in Mac. Nobody opens ports at home."
+      : "Firewall: allow incoming TCP 9700 on this Mac so pipeline peers can reach it.");
 }
 
 // ------------------------------------------------------------ LLMs
@@ -925,6 +940,17 @@ const actions = {
     toast(`Connected to ${ov.status.coordinator_url}`);
   }),
 
+  "connect-public": (btn) => withBusy("connect", btn, "Connecting…", async () => {
+    if (!signedIn()) throw new Error("Sign in first.");
+    const url = $("#public-url").value.trim() || status().public_url || "";
+    if (!url) throw new Error("Enter the public coordinator URL.");
+    const snap = await post("/api/start", { ...state.settings, mode: "public", url });
+    if (snap.last_error) throw new Error(snap.last_error);
+    const ov = await api("/api/overview");
+    if (!ov.status.coordinator_up) throw new Error(`No coordinator answering at ${ov.status.coordinator_url}.`);
+    toast(`Connected to ${ov.status.coordinator_url}`);
+  }),
+
   discover: (btn) => withBusy("discover", btn, "Searching…", async () => {
     const r = await post("/api/discover");
     state.settings = { ...state.settings, url: r.url };
@@ -1072,6 +1098,10 @@ $("#url").addEventListener("keydown", (e) => {
   if (e.key === "Enter") actions.connect($("#p-connect"));
 });
 
+$("#public-url").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") actions["connect-public"]($("#p-connect-public"));
+});
+
 $("#dataset").addEventListener("change", (e) => {
   state.dataset = e.target.files[0] || null;
   const name = $("#dataset-name");
@@ -1084,7 +1114,8 @@ $("#job-form").addEventListener("submit", (e) => {
   const msg = $("#job-msg");
   if (!state.dataset) return setMsg("#job-msg", "Choose a JSONL dataset first.", "bad");
   const steps = Number($("#steps").value);
-  const minStages = Number($("#min_stages").value);
+  const publicPool = (state.settings || {}).mode === "public";
+  const minStages = publicPool ? 1 : Number($("#min_stages").value);
   if (!Number.isInteger(steps) || steps < 1) return setMsg("#job-msg", "Steps must be a whole number above zero.", "bad");
   if (!Number.isInteger(minStages) || minStages < 1) return setMsg("#job-msg", "Min Macs must be at least 1.", "bad");
   const body = new FormData();

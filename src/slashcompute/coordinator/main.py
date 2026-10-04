@@ -27,6 +27,7 @@ def serve(
     mdns: bool = typer.Option(True, help="Advertise on the LAN via mDNS"),
     inference_transport: Optional[str] = typer.Option(
         None, help="LLM inference: direct (LAN, default) or relay (internet: RPC through the coordinator)"),
+    public: bool = typer.Option(False, "--public", help="Internet pool: login, one Mac per job, no mDNS"),
 ):
     """Run the coordinator."""
     import uvicorn
@@ -35,16 +36,19 @@ def serve(
     from slashcompute.inference.config import TRANSPORTS, InferenceSettings
 
     setup_logging("coordinator")
-    cfg = EngineConfig.from_env(coordinator_host=host, coordinator_port=port, home=home)
+    cfg = EngineConfig.from_env(
+        coordinator_host=host, coordinator_port=port, home=home,
+        public_pool=True if public else None,
+    )
     inference = InferenceSettings.from_env(DB_PATH=str(cfg.home / "inference.sqlite3"),
                                            MODELS_DIR=str(cfg.home / "models"))
     if inference_transport:
         if inference_transport not in TRANSPORTS:
             raise typer.BadParameter(f"--inference-transport must be one of {', '.join(TRANSPORTS)}")
         inference = inference.replace(TRANSPORT=inference_transport)
-    uvicorn.run(create_app(cfg, advertise=mdns, inference=inference), host=cfg.coordinator_host,
-                port=cfg.coordinator_port, log_level="warning", ws_ping_interval=20,
-                ws_max_size=64 * 1024 * 1024)
+    uvicorn.run(create_app(cfg, advertise=bool(mdns) and not cfg.public_pool, inference=inference),
+                host=cfg.coordinator_host, port=cfg.coordinator_port, log_level="warning",
+                ws_ping_interval=20, ws_max_size=64 * 1024 * 1024)
 
 
 @app.command()

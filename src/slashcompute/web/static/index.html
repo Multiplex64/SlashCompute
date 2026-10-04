@@ -13,7 +13,7 @@
   <div class="app">
     <aside class="side">
       <div class="brand">
-        <img class="brand-mark" src="/static/logo.png" width="56" height="56" alt="">
+        <img class="brand-mark" src="/static/logo.png" width="48" height="48" alt="">
         <span class="brand-name"><span class="slash">/</span>COMPUTE</span>
       </div>
       <p class="tagline">Pooled Macs for everyone</p>
@@ -91,7 +91,7 @@
           </article>
         </div>
 
-        <div class="grid two">
+        <div class="grid two c-panels">
           <article class="card">
             <header class="card-head"><h2>Contribute this Mac</h2></header>
             <div class="state"><i class="sq" id="c-dot"></i><b id="c-state">Not contributing</b></div>
@@ -101,6 +101,7 @@
               <input type="range" id="gpu" min="1" max="100" value="50">
               <p class="hint" id="gpu-hint"></p>
             </div>
+            <div id="c-mac"></div>
             <button type="button" class="btn primary block" id="c-toggle" data-act="toggle-contribute">Start contributing</button>
           </article>
 
@@ -113,16 +114,6 @@
             </div>
             <input type="range" class="split-range" id="split" min="0" max="100" value="0" aria-label="Share of credits given to grants">
             <p class="hint" id="split-hint">Credits are 1:1 with FLOPs. Sign in so this split is saved on your account.</p>
-          </article>
-        </div>
-
-        <div class="grid two">
-          <article class="card">
-            <header class="card-head"><h2>This Mac</h2></header>
-            <div id="c-mac"></div>
-          </article>
-          <article class="card">
-            <header class="card-head"><h2>How contributing works</h2></header>
             <ul class="terms">
               <li>Runs in the background at the GPU share you choose, only while contributing is on.</li>
               <li>Only predefined job types run. Nobody can send your Mac arbitrary code.</li>
@@ -248,11 +239,12 @@
         <header class="view-head">
           <div>
             <h1>Pool</h1>
-            <p>Host a pool on this Mac, or join one already running on your network.</p>
+            <p>Host a pool on this Mac, join one on your network, or connect to a public pool.</p>
           </div>
           <div class="seg" id="p-mode" role="tablist" aria-label="Pool mode">
             <button type="button" data-mode="host">Host pool</button>
             <button type="button" data-mode="join">Join pool</button>
+            <button type="button" data-mode="public">Public pool</button>
           </div>
         </header>
 
@@ -282,6 +274,16 @@
               <button type="button" class="btn ghost" id="p-find" data-act="discover">Find on LAN</button>
             </div>
             <p class="hint">Once connected, start contributing from the Contributions tab.</p>
+          </article>
+
+          <article class="card" id="p-public" hidden>
+            <header class="card-head"><h2>Public pool</h2></header>
+            <p class="muted">Dial a coordinator on the internet. Sign in first. Each job runs on one Mac.</p>
+            <div class="field"><label for="public-url">Coordinator address</label><input type="text" id="public-url" placeholder="https://pool.example.com" spellcheck="false" autocomplete="off"></div>
+            <div class="btn-row">
+              <button type="button" class="btn primary grow" id="p-connect-public" data-act="connect-public">Connect</button>
+            </div>
+            <p class="hint">Nobody opens ports at home. You will host this server later.</p>
           </article>
 
           <article class="card">

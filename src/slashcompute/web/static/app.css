@@ -1,21 +1,45 @@
 /*
   /compute, SIGNAL finish. A light concrete field with carbon slabs on it.
-  Archivo Black for headline numbers, Martian Mono for everything else,
+  IBM Plex Sans for UI, IBM Plex Mono for numbers and addresses,
   square chrome, chartreuse for "go", red-orange for grants and warnings.
 */
 
 @font-face {
-  font-family: "Archivo Black";
-  src: url("/static/fonts/archivo-black.woff2") format("woff2");
+  font-family: "IBM Plex Sans";
+  src: url("/static/fonts/ibm-plex-sans-regular.woff2") format("woff2");
   font-weight: 400;
   font-style: normal;
   font-display: swap;
 }
 
 @font-face {
-  font-family: "Martian Mono";
-  src: url("/static/fonts/martian-mono.woff2") format("woff2");
+  font-family: "IBM Plex Sans";
+  src: url("/static/fonts/ibm-plex-sans-medium.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "IBM Plex Sans";
+  src: url("/static/fonts/ibm-plex-sans-bold.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("/static/fonts/ibm-plex-mono-regular.woff2") format("woff2");
   font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("/static/fonts/ibm-plex-mono-medium.woff2") format("woff2");
+  font-weight: 500;
   font-style: normal;
   font-display: swap;
 }
@@ -36,6 +60,8 @@
   --field-1: #cfcfcc;
   --field-2: #a9a9a6;
   --side-w: 236px;
+  --font: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
 }
 
 *,
@@ -50,9 +76,9 @@ html, body {
 }
 
 body {
-  font-family: "Martian Mono", ui-monospace, monospace;
-  font-size: 12.5px;
-  line-height: 1.55;
+  font-family: var(--font);
+  font-size: 15px;
+  line-height: 1.5;
   color: var(--carbon);
   background: radial-gradient(130% 110% at 62% 28%,
     var(--field-0) 0%, var(--field-1) 52%, var(--field-2) 100%) fixed;
@@ -97,23 +123,28 @@ body {
 
 .brand {
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  align-items: flex-start;
   gap: 12px;
   padding: 0 8px;
+  min-width: 0;
 }
 
 .brand-mark {
-  width: 56px;
-  height: 56px;
+  width: 48px;
+  height: 48px;
   flex: none;
   display: block;
 }
 
 .brand-name {
-  font-family: "Archivo Black", sans-serif;
-  font-size: 32px;
-  line-height: 0.9;
-  letter-spacing: -0.03em;
+  display: block;
+  font-family: var(--font);
+  font-weight: 700;
+  font-size: 26px;
+  line-height: 0.95;
+  letter-spacing: -0.02em;
+  white-space: nowrap;
 }
 
 .brand .slash { color: var(--sig); }
@@ -181,13 +212,34 @@ body {
 
 .main {
   overflow-y: auto;
-  padding: 36px 40px 56px;
+  padding: 28px 32px;
   position: relative;
   z-index: 1;
 }
 
-.view { display: none; max-width: 1260px; }
+.view { display: none; }
 .view.is-on { display: block; }
+
+#view-contributions.view.is-on {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 12px;
+  height: calc(100dvh - 56px);
+  min-height: calc(100dvh - 56px);
+}
+
+#view-contributions .grid { margin-bottom: 0; min-height: 0; }
+#view-contributions .c-panels {
+  align-content: stretch;
+}
+#view-contributions .c-panels .card {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+#view-contributions .c-panels .btn.block { margin-top: auto; }
+#view-contributions #c-mac { margin-top: 20px; }
+#view-contributions .terms { margin-top: 22px; }
 
 .view-head {
   display: flex;
@@ -197,23 +249,24 @@ body {
   margin-bottom: 26px;
 }
 
+#view-contributions .view-head { margin-bottom: 0; }
+
 .view-head h1 {
   margin: 0;
-  font-family: "Archivo Black", sans-serif;
-  font-weight: 400;
-  font-size: clamp(36px, 4.6vw, 56px);
-  line-height: 0.9;
-  letter-spacing: -0.035em;
-  text-transform: uppercase;
+  font-family: var(--font);
+  font-weight: 700;
+  font-size: clamp(32px, 3.6vw, 44px);
+  line-height: 1;
+  letter-spacing: -0.03em;
 }
 
 .view-head p { margin: 12px 0 0; color: #3d3d3b; max-width: 64ch; }
 
 /* ------------------------------------------------------------ grid + cards */
 
-.grid { display: grid; gap: 16px; margin-bottom: 16px; }
+.grid { display: grid; gap: 20px; margin-bottom: 20px; }
 .grid.top { align-items: start; }
-.tiles { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.tiles { grid-template-columns: repeat(4, minmax(0, 1fr)); align-items: start; }
 .three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .split-2-3 { grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); }
@@ -223,7 +276,7 @@ body {
 .card {
   background: var(--slab);
   color: var(--paper);
-  padding: 20px;
+  padding: 28px;
   min-width: 0;
   box-shadow: 0 14px 26px rgba(20, 20, 20, 0.24);
 }
@@ -264,15 +317,21 @@ body {
   text-transform: uppercase;
 }
 
+.tile {
+  display: flex;
+  flex-direction: column;
+}
+
 .tile strong,
 .split strong {
   display: block;
-  margin-top: 10px;
-  font-family: "Archivo Black", sans-serif;
-  font-weight: 400;
-  font-size: 30px;
+  margin-top: 12px;
+  font-family: var(--font-mono);
+  font-weight: 500;
+  font-size: 42px;
   line-height: 1.05;
-  letter-spacing: -0.01em;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
   overflow-wrap: anywhere;
 }
 
@@ -291,7 +350,7 @@ body {
 .foot { color: #3d3d3b; font-size: 11px; margin: 4px 0 0; }
 .empty { color: var(--dim); margin: 0; padding: 6px 0; }
 
-.spark { display: block; width: 100%; height: 36px; margin-top: 12px; overflow: visible; }
+.spark { display: none; }
 
 /* ------------------------------------------------------------ tags, dots, bars */
 
@@ -383,7 +442,7 @@ textarea {
   display: block;
   width: 100%;
   font: inherit;
-  font-size: 12.5px;
+  font-size: 14px;
   color: var(--paper);
   background: #0a0a0a;
   border: 1px solid var(--line-2);
@@ -450,7 +509,7 @@ input[type="range"]::-webkit-slider-thumb {
 
 #u-open-pool { margin-top: 10px; }
 
-.seg { display: inline-flex; gap: 3px; padding: 3px; background: var(--carbon); }
+.seg { display: inline-flex; flex-wrap: wrap; gap: 3px; padding: 3px; background: var(--carbon); }
 
 .seg button {
   all: unset;
@@ -541,7 +600,7 @@ input[type="range"]::-webkit-slider-thumb {
 }
 
 .leaders li.is-me { background: var(--slab-2); box-shadow: inset 3px 0 0 var(--sig); }
-.leaders .rank { font-family: "Archivo Black", sans-serif; font-size: 18px; color: var(--dim); }
+.leaders .rank { font-family: var(--font-mono); font-weight: 500; font-size: 18px; color: var(--dim); }
 .leaders li:nth-child(-n+3) .rank { color: var(--sig); }
 .leaders .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .leaders .flops { color: var(--warm); font-size: 11px; white-space: nowrap; }
@@ -586,7 +645,7 @@ input[type="range"]::-webkit-slider-thumb {
   padding: 6px 6px 6px 12px;
 }
 
-.addr code { flex: 1; font-family: inherit; font-size: 14px; color: var(--sig); }
+.addr code { flex: 1; font-family: var(--font-mono); font-size: 14px; color: var(--sig); }
 
 .status { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 14px 16px; margin: 0; }
 .status dt { display: flex; align-items: center; gap: 10px; color: var(--warm); }
@@ -639,6 +698,11 @@ input[type="range"]::-webkit-slider-thumb {
 @media (max-width: 1020px) {
   .two, .three, .split-2-3, .split-3-2 { grid-template-columns: minmax(0, 1fr); }
   .main { padding: 28px 24px 48px; }
+  #view-contributions.view.is-on {
+    height: auto;
+    min-height: 0;
+    grid-template-rows: auto;
+  }
 }
 
 @media (max-width: 760px) {

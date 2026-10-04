@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from dataclasses import replace
 
 import httpx
 import pytest
@@ -22,8 +23,9 @@ def fast_hash(monkeypatch):
 
 
 @pytest.fixture
-async def pool(tmp_path):
-    cfg = EngineConfig(home=tmp_path / "home", scheduler_tick_s=0.05, verify_rate=0.0)
+async def pool(tmp_path, request):
+    cfg = EngineConfig(home=tmp_path / "home", scheduler_tick_s=0.05, verify_rate=0.0,
+                       public_pool=getattr(request, "param", False))
     h = await start_harness(fast_settings(PIPELINE_IDLE_SECONDS=30),
                             app_factory=lambda: create_app(cfg, inference=fast_settings(PIPELINE_IDLE_SECONDS=30)),
                             tmp=str(tmp_path / "nodes"))
@@ -74,13 +76,17 @@ async def test_streaming_chat_through_the_main_coordinator(pool):
         assert sum(row["flops"] for row in infer.values()) == pytest.approx(net["flops"])
 
 
-async def test_signed_in_chatter_pays_hosts_in_flops(pool):
+@pytest.mark.parametrize("pool", [False, True], indirect=True, ids=["lan", "public"])
+@pytest.mark.parametrize("authentication", ["bearer", "cookie"])
+async def test_signed_in_chatter_pays_hosts_in_flops(pool, authentication):
     h = pool
     host, host_token = account(h, "host@lan.test")
     chatter, chat_token = account(h, "chatter@lan.test", balance=1e16)
     await two_nodes(h, session_token=host_token)
     credits = core(h).credits
-    r = await chat(h, QWEN, max_tokens=8, headers={"Authorization": f"Bearer {chat_token}"})
+    headers = ({"Authorization": f"Bearer {chat_token}"} if authentication == "bearer"
+               else {"Cookie": f"slashcompute_session={chat_token}"})
+    r = await chat(h, QWEN, max_tokens=8, headers=headers)
     assert r.status_code == 200, r.text
     flops = r.json()["network"]["flops"]
     assert flops > 0
@@ -100,6 +106,7 @@ async def test_anonymous_chat_is_free_and_earns_nobody(pool):
     assert usage and all(row["flops"] > 0 for row in usage)  # but the work is still on the books
 
 
+@pytest.mark.parametrize("pool", [False, True], indirect=True, ids=["lan", "public"])
 async def test_broke_or_unconsented_chatters_are_refused(pool):
     h = pool
     await two_nodes(h)
@@ -109,6 +116,38 @@ async def test_broke_or_unconsented_chatters_are_refused(pool):
     _, no_terms = account(h, "new@lan.test", terms=False, balance=1e16)
     r = await chat(h, QWEN, headers={"Authorization": f"Bearer {no_terms}"})
     assert r.status_code == 403
+
+
+@pytest.mark.parametrize("pool", [True], indirect=True, ids=["public"])
+@pytest.mark.parametrize("headers", [
+    {},
+    {"Authorization": "Bearer invalid-session"},
+    {"Cookie": "slashcompute_session=invalid-session"},
+], ids=["missing-session", "invalid-bearer", "invalid-cookie"])
+@pytest.mark.parametrize("stream", [False, True], ids=["json", "stream"])
+async def test_public_chat_requires_an_account_before_running_inference(pool, headers, stream):
+    host, host_token = account(pool, "host@lan.test")
+    await two_nodes(pool, session_token=host_token)
+    r = await chat(pool, QWEN, headers=headers, stream=stream)
+    assert r.status_code == 401 and "Sign in first" in r.text
+    assert not [row for row in core(pool).ledger.summary() if row["kind"] == "infer"]
+    assert core(pool).credits.lifetime_earned(host.id) == 0
+
+
+@pytest.mark.parametrize("pool", [True], indirect=True, ids=["public"])
+async def test_shared_inference_secret_does_not_replace_a_public_account(pool):
+    service = pool.app.state.inference
+    service.s = replace(service.s, TOKEN="shared-pool-secret")
+    r = await chat(pool, QWEN, headers={"x-inference-token": "shared-pool-secret"})
+    assert r.status_code == 401 and "Sign in first" in r.text
+
+
+@pytest.mark.parametrize("pool", [False, True], indirect=True, ids=["lan", "public"])
+async def test_banned_chatter_is_refused(pool):
+    user, token = account(pool, "banned@lan.test", balance=1e16)
+    core(pool).auth.set_banned(user, True)
+    r = await chat(pool, QWEN, headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 403 and "banned" in r.text
 
 
 async def test_training_on_a_mac_drains_its_inference_pipelines(pool):

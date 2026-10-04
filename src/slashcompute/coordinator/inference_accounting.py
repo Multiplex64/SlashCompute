@@ -25,6 +25,8 @@ class CoreAccounting:
     def requester(self, request: Request) -> Optional[str]:
         user = self.core.auth.session_user(_token(request, request.headers.get("authorization")))
         if user is None:
+            if self.core.cfg.public_pool:
+                raise AccountingError("Sign in first.", 401)
             return None
         if user.banned:
             raise AccountingError("This account is banned.", 403)

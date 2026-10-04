@@ -1,5 +1,6 @@
 import json
 import signal
+import stat
 from pathlib import Path
 
 import pytest
@@ -146,6 +147,8 @@ def test_start_host_spawns_coordinator_and_agent(tmp_path, monkeypatch):
     assert "--url" in argv_lists[1] and "127.0.0.1" in argv_lists[1][argv_lists[1].index("--url") + 1]
     assert "--no-sandbox" not in argv_lists[1]
     assert (tmp_path / "coordinator.pid").read_text().strip() == str(launcher._spawned[0].pid)
+    assert json.loads((tmp_path / "agent.args").read_text()) == argv_lists[1]
+    assert stat.S_IMODE((tmp_path / "agent.args").stat().st_mode) == 0o600
     assert snap.last_error == ""
 
 
@@ -158,36 +161,143 @@ def test_start_host_without_contribute_skips_agent(tmp_path):
     assert kinds == ["slashcompute.coordinator.main"]
 
 
-def test_start_rebinds_agent_when_session_changes(tmp_path, monkeypatch):
+@pytest.mark.parametrize(("old_token", "new_url", "new_gpu", "new_token"), [
+    ("tok", "http://10.0.0.2:8765", 50, "tok"),
+    ("tok", "http://10.0.0.1:8765", 75, "tok"),
+    ("tok", "http://10.0.0.1:8765", 50, "newtok"),
+    ("", "http://10.0.0.1:8765", 50, "tok"),
+    ("tok", "http://10.0.0.1:8765", 50, ""),
+])
+def test_start_restarts_agent_when_effective_arguments_change(
+    tmp_path, monkeypatch, old_token, new_url, new_gpu, new_token,
+):
     http = FakeHTTP({"ok": True, "nodes": 0, "jobs": 0})
     launcher = _launcher(tmp_path, http=http)
     (tmp_path / "agent" / "agent.pid").write_text("77\n")
-    (tmp_path / "agent.session").write_text("old\n")
+    old_args = launcher.agent_argv("http://10.0.0.1:8765", 50, old_token)
+    (tmp_path / "agent.args").write_text(json.dumps(old_args))
     running = {77: True}
+    stopped = []
 
     def alive(pid: int) -> bool:
         return running.get(pid, False)
 
     def stop(paths):
+        stopped.append(paths.read_pid())
         running[77] = False
         paths.clear_pid()
         return True
 
     monkeypatch.setattr("slashcompute.launcher.controller.process_alive", alive)
     monkeypatch.setattr("slashcompute.launcher.controller.request_stop", stop)
-    launcher.start(LauncherSettings(mode="host", contribute=True, session_token="newtok"))
+    snap = launcher.start(LauncherSettings(
+        mode="join", url=new_url, gpu_percent=new_gpu, session_token=new_token,
+    ))
     spawned = launcher._spawned  # type: ignore[attr-defined]
+    assert stopped == [77]
     assert len(spawned) == 1
-    assert spawned[0].argv[-2:] == ["--session-token", "newtok"]
-    assert (tmp_path / "agent.session").read_text() == "newtok"
+    assert spawned[0].argv == launcher.agent_argv(new_url, new_gpu, new_token)
+    assert json.loads((tmp_path / "agent.args").read_text()) == spawned[0].argv
+    assert snap.last_error == ""
+
+
+@pytest.mark.parametrize(("explicit_token", "expected_token", "should_restart"), [
+    ("", "new-environment-token", True),
+    ("explicit-token", "explicit-token", False),
+])
+def test_agent_restart_compares_effective_environment_session(
+    tmp_path, monkeypatch, explicit_token, expected_token, should_restart,
+):
+    launcher = _launcher(tmp_path, http=FakeHTTP({"ok": True}))
+    settings = LauncherSettings(
+        mode="join", url="http://10.0.0.1:8765", session_token=explicit_token,
+    )
+    monkeypatch.setenv("SLASHCOMPUTE_SESSION", "old-environment-token")
+    launcher.start(settings)
+    old_args = launcher._spawned[0].argv
+    assert old_args[-2:] == ["--session-token", explicit_token or "old-environment-token"]
+    launcher.paths.pid_file.write_text("77\n")
+    monkeypatch.setattr("slashcompute.launcher.controller.process_alive", lambda pid: True)
+    stopped = []
+
+    def stop(paths):
+        stopped.append(paths.read_pid())
+        paths.clear_pid()
+
+    monkeypatch.setattr("slashcompute.launcher.controller.request_stop", stop)
+    monkeypatch.setenv("SLASHCOMPUTE_SESSION", "new-environment-token")
+    # Ensure rewriting an existing args file also repairs overly broad permissions.
+    (tmp_path / "agent.args").chmod(0o644 if should_restart else 0o600)
+
+    launcher.start(settings)
+
+    assert stopped == ([77] if should_restart else [])
+    assert len(launcher._spawned) == (2 if should_restart else 1)
+    assert launcher._spawned[-1].argv[-2:] == ["--session-token", expected_token]
+    assert json.loads((tmp_path / "agent.args").read_text()) == launcher._spawned[-1].argv
+    assert stat.S_IMODE((tmp_path / "agent.args").stat().st_mode) == 0o600
 
 
 def test_start_when_already_up_is_noop(tmp_path, monkeypatch):
     launcher = _launcher(tmp_path, http=FakeHTTP({"ok": True, "nodes": 1, "jobs": 0}))
     (tmp_path / "agent" / "agent.pid").write_text("77\n")
+    argv = launcher.agent_argv("http://10.0.0.1:8765", 100, "tok")
+    (tmp_path / "agent.args").write_text(json.dumps(argv))
     monkeypatch.setattr("slashcompute.launcher.controller.process_alive", lambda pid: True)
-    launcher.start(LauncherSettings(mode="host", contribute=True))
+    monkeypatch.setattr("slashcompute.launcher.controller.request_stop",
+                        lambda paths: pytest.fail("unchanged agent should not stop"))
+    snap = launcher.start(LauncherSettings(
+        mode="join", url="http://10.0.0.1:8765/", gpu_percent=999, session_token="tok",
+    ))
     assert launcher._spawned == []  # type: ignore[attr-defined]
+    assert snap.agent_running and snap.last_error == ""
+
+
+@pytest.mark.parametrize("args_text", [None, "not-json"])
+def test_start_restarts_agent_with_unknown_previous_arguments(tmp_path, monkeypatch, args_text):
+    launcher = _launcher(tmp_path, http=FakeHTTP({"ok": True}))
+    launcher.paths.pid_file.write_text("77\n")
+    # Launchers before agent.args recorded only the bound session.
+    (tmp_path / "agent.session").write_text("tok")
+    if args_text is not None:
+        (tmp_path / "agent.args").write_text(args_text)
+    monkeypatch.setattr("slashcompute.launcher.controller.process_alive", lambda pid: True)
+    monkeypatch.setattr("slashcompute.launcher.controller.request_stop",
+                        lambda paths: paths.clear_pid())
+    launcher.start(LauncherSettings(mode="host", session_token="tok"))
+    assert len(launcher._spawned) == 1
+    assert json.loads((tmp_path / "agent.args").read_text()) == launcher._spawned[0].argv
+
+
+def test_agent_restart_waits_for_graceful_stop_and_reports_timeout(tmp_path, monkeypatch):
+    launcher = _launcher(tmp_path, http=FakeHTTP({"ok": True}))
+    launcher.paths.pid_file.write_text("77\n")
+    old_args = launcher.agent_argv("http://10.0.0.1:8765", 50, "tok")
+    (tmp_path / "agent.args").write_text(json.dumps(old_args))
+    stopped = []
+    monkeypatch.setattr("slashcompute.launcher.controller.process_alive", lambda pid: True)
+    monkeypatch.setattr("slashcompute.launcher.controller.request_stop",
+                        lambda paths: stopped.append(paths.read_pid()))
+    times = iter([0.0, 0.0, 4.0])
+    monkeypatch.setattr("slashcompute.launcher.controller.time.monotonic", lambda: next(times))
+    monkeypatch.setattr("slashcompute.launcher.controller.time.sleep", lambda seconds: None)
+    settings = LauncherSettings(mode="join", url="http://10.0.0.2:8765", session_token="tok")
+
+    snap = launcher.start(settings)
+
+    assert stopped == [77]
+    assert snap.agent_running and snap.agent_pid == 77
+    assert "Settings have not been applied" in snap.last_error
+    assert launcher._spawned == []
+    assert json.loads((tmp_path / "agent.args").read_text()) == old_args
+
+    # Retrying after the old agent drains applies the saved configuration.
+    launcher.paths.clear_pid()
+    snap = launcher.start(settings)
+    assert len(launcher._spawned) == 1
+    assert launcher._spawned[0].argv == launcher.agent_argv(settings.url, 50, "tok")
+    assert json.loads((tmp_path / "agent.args").read_text()) == launcher._spawned[0].argv
+    assert snap.last_error == ""
 
 
 def test_start_join_requires_url(tmp_path):

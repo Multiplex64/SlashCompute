@@ -146,6 +146,7 @@ class Coordinator:
         job.row.status, job.row.error, job.row.finished_at = "cancelled", reason, now()
         self.db.save(job.row)
         self.jobs.pop(job.id, None)
+        self.dataset_path(job.id).unlink(missing_ok=True)
 
     def dataset_path(self, job_id: str) -> Path:
         return self.checkpoints.job_dir(job_id) / "dataset.jsonl"

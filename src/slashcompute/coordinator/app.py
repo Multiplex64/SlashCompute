@@ -144,6 +144,50 @@ def create_app(cfg: EngineConfig, advertise: bool = False,
             raise HTTPException(404, "job not found")
         return job
 
+    def _public_user(request: Request):
+        user = _user(request, request.headers.get("authorization"))
+        if user is None:
+            raise HTTPException(401, "Sign in first.")
+        return user
+
+    def _assigned_user(job, user_id: str, stage: Optional[int] = None,
+                       epoch: Optional[int] = None) -> bool:
+        current = job.current
+        if current is None or current.closed or (epoch is not None and current.epoch != epoch):
+            return False
+        return any(
+            node.user_id == user_id and node.assignment is not None
+            and node.assignment.job_id == job.id
+            and node.assignment.epoch == current.epoch
+            and (stage is None or node.assignment.stage_idx == stage)
+            for node in core.registry.nodes.values()
+        )
+
+    def _job_access(job, request: Request, *, assigned: bool = False) -> None:
+        if not core.cfg.public_pool:
+            return
+        user = _public_user(request)
+        account = core.credits.job_account(job.id)
+        if user.admin or (account is not None and account.user_id == user.id):
+            return
+        if assigned and _assigned_user(job, user.id):
+            return
+        raise HTTPException(403, "You do not have access to this job.")
+
+    def _verification_access(vid: str, request: Request, role: str) -> None:
+        if not core.cfg.public_pool:
+            return
+        user = _public_user(request)
+        row = core.db.get(Verification, vid)
+        if row is None:
+            raise HTTPException(404)
+        node = core.registry.get(getattr(row, role))
+        active = row.status == "fetching" if role == "target_node_id" else (
+            row.status == "running" and node is not None and node.verifying == vid
+        )
+        if not active or node is None or node.user_id != user.id:
+            raise HTTPException(403, "You are not assigned to this verification.")
+
     @app.post("/jobs")
     async def submit_job(body: dict, request: Request,
                          authorization: Optional[str] = Header(default=None)):
@@ -152,6 +196,9 @@ def create_app(cfg: EngineConfig, advertise: bool = False,
             raise HTTPException(401, "Sign in first.")
         if _token(request, authorization) and user is None:
             raise HTTPException(401, "Sign in first.")
+        if core.cfg.public_pool and not user.admin:
+            # A caller-selected server path could copy another user's private dataset.
+            raise HTTPException(403, "Upload your dataset using /jobs/upload.")
         try:
             spec = parse_spec(body)
             job = core.submit(spec)
@@ -172,6 +219,9 @@ def create_app(cfg: EngineConfig, advertise: bool = False,
         max_flops: Optional[float] = Form(None),
         authorization: Optional[str] = Header(default=None),
     ):
+        user = _user(request, authorization)
+        if user is None and (core.cfg.public_pool or _token(request, authorization)):
+            raise HTTPException(401, "Sign in first.")
         uploads = cfg.home / "uploads"
         uploads.mkdir(parents=True, exist_ok=True)
         raw = (dataset.filename or "train.jsonl").replace("\\", "/").split("/")[-1]
@@ -187,26 +237,25 @@ def create_app(cfg: EngineConfig, advertise: bool = False,
             if len(buf) + len(chunk) > MAX_DATASET_BYTES:
                 raise HTTPException(400, "dataset is too large.")
             buf.extend(chunk)
-        dest.write_bytes(bytes(buf))
-        user = _user(request, authorization)
-        if core.cfg.public_pool and user is None:
-            raise HTTPException(401, "Sign in first.")
-        if _token(request, authorization) and user is None:
-            raise HTTPException(401, "Sign in first.")
         if core.cfg.public_pool:
             min_stages = 1
         try:
-            spec = parse_spec({
-                "kind": "lora_finetune", "model": model, "dataset_path": str(dest),
-                "steps": steps, "min_stages": min_stages,
-                "batch_size": batch_size, "microbatches": microbatches,
-                **({"max_stages": 1} if core.cfg.public_pool else {}),
-            })
-            job = core.submit(spec)
-        except (ValidationError, ValueError, FileNotFoundError) as e:
-            raise HTTPException(400, str(e))
-        _reserve(user, job, max_flops)
-        return core.job_view(job)
+            dest.write_bytes(bytes(buf))
+            try:
+                spec = parse_spec({
+                    "kind": "lora_finetune", "model": model, "dataset_path": str(dest),
+                    "steps": steps, "min_stages": min_stages,
+                    "batch_size": batch_size, "microbatches": microbatches,
+                    **({"max_stages": 1} if core.cfg.public_pool else {}),
+                })
+                job = core.submit(spec)
+            except (ValidationError, ValueError, FileNotFoundError) as e:
+                raise HTTPException(400, str(e))
+            _reserve(user, job, max_flops)
+            return core.job_view(job)
+        finally:
+            # submit() keeps its own copy; failed submissions must not retain uploads.
+            dest.unlink(missing_ok=True)
 
     @app.get("/jobs")
     async def list_jobs(request: Request, mine: int = 0,
@@ -229,8 +278,9 @@ def create_app(cfg: EngineConfig, advertise: bool = False,
         return core.job_view(_job(job_id))
 
     @app.post("/jobs/{job_id}/cancel")
-    async def cancel_job(job_id: str):
+    async def cancel_job(job_id: str, request: Request):
         job = _job(job_id)
+        _job_access(job, request)
         await core.cancel_job(job)
         return core.job_view(job)
 
@@ -240,13 +290,13 @@ def create_app(cfg: EngineConfig, advertise: bool = False,
         return [r.model_dump() for r in core.ledger.job_records(job_id)]
 
     @app.get("/jobs/{job_id}/dataset")
-    async def get_dataset(job_id: str):
-        _job(job_id)
+    async def get_dataset(job_id: str, request: Request):
+        _job_access(_job(job_id), request, assigned=True)
         return FileResponse(core.dataset_path(job_id))
 
     @app.get("/jobs/{job_id}/checkpoints/{step}")
-    async def get_checkpoint(job_id: str, step: int):
-        _job(job_id)
+    async def get_checkpoint(job_id: str, step: int, request: Request):
+        _job_access(_job(job_id), request, assigned=True)
         path = core.checkpoints.merged_path(job_id, step)
         if not path.exists():
             raise HTTPException(404, "checkpoint not found")
@@ -254,6 +304,10 @@ def create_app(cfg: EngineConfig, advertise: bool = False,
 
     @app.post("/jobs/{job_id}/checkpoints/{step}")
     async def put_checkpoint(job_id: str, step: int, epoch: int, stage: int, request: Request):
+        if core.cfg.public_pool:
+            user = _public_user(request)
+            if not _assigned_user(_job(job_id), user.id, stage=stage, epoch=epoch):
+                raise HTTPException(403, "You are not assigned to this stage.")
         data = await request.body()
         try:
             core.on_checkpoint_upload(job_id, epoch, stage, step, data)
@@ -262,7 +316,8 @@ def create_app(cfg: EngineConfig, advertise: bool = False,
         return {"ok": True}
 
     @app.get("/jobs/{job_id}/adapter/{name}")
-    async def get_adapter(job_id: str, name: str):
+    async def get_adapter(job_id: str, name: str, request: Request):
+        _job_access(_job(job_id), request)
         if name not in ("adapters.safetensors", "adapter_config.json"):
             raise HTTPException(404)
         path = core.checkpoints.job_dir(job_id) / "adapter" / name
@@ -288,6 +343,7 @@ def create_app(cfg: EngineConfig, advertise: bool = False,
 
     @app.post("/verify/{vid}/bundle")
     async def put_bundle(vid: str, request: Request):
+        _verification_access(vid, request, "target_node_id")
         try:
             core.verification.store_bundle(vid, await request.body())
         except KeyError:
@@ -295,7 +351,8 @@ def create_app(cfg: EngineConfig, advertise: bool = False,
         return {"ok": True}
 
     @app.get("/verify/{vid}/bundle")
-    async def get_bundle(vid: str):
+    async def get_bundle(vid: str, request: Request):
+        _verification_access(vid, request, "verifier_node_id")
         if core.db.get(Verification, vid) is None:
             raise HTTPException(404)
         path = core.verification.bundle_path(vid)
@@ -305,6 +362,7 @@ def create_app(cfg: EngineConfig, advertise: bool = False,
 
     @app.post("/verify/{vid}/result")
     async def put_result(vid: str, request: Request):
+        _verification_access(vid, request, "verifier_node_id")
         try:
             core.verification.store_result(vid, await request.body())
         except KeyError:

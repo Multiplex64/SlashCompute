@@ -355,17 +355,24 @@ class Launcher:
         if not want_agent and self._agent_running():
             request_stop(self.paths)
         if want_agent:
-            bound = self._bound_session()
-            rebind = bool(s.session_token) and s.session_token != bound
-            if self._agent_running() and rebind:
+            token = s.session_token or os.environ.get("SLASHCOMPUTE_SESSION", "")
+            argv = self.agent_argv(agent_url, s.gpu_percent, token)
+            if self._agent_running() and self._read_agent_args() != argv:
                 request_stop(self.paths)
                 deadline = time.monotonic() + 3.0
                 while time.monotonic() < deadline and self._agent_running():
                     time.sleep(0.05)
+                if self._agent_running():
+                    self.last_error = (
+                        "Training agent is still stopping. Settings have not been applied; "
+                        "start again after its current work finishes."
+                    )
             if not self._agent_running():
-                self._spawn(self.agent_argv(agent_url, s.gpu_percent, s.session_token),
-                            self.log_dir / "agent.log")
-                self._write_bound_session(s.session_token)
+                self._spawn(argv, self.log_dir / "agent.log")
+                args_path = self._agent_args_path()
+                args_path.touch(mode=0o600)
+                args_path.chmod(0o600)
+                args_path.write_text(json.dumps(argv))
 
         if want_inference:
             if s.mode == "join" and not self.poll_health(url):
@@ -463,17 +470,14 @@ class Launcher:
         except (OSError, ValueError):
             return []
 
-    def _agent_session_path(self) -> Path:
-        return self.home / "agent.session"
+    def _agent_args_path(self) -> Path:
+        return self.home / "agent.args"
 
-    def _bound_session(self) -> str:
+    def _read_agent_args(self) -> list[str]:
         try:
-            return self._agent_session_path().read_text().strip()
-        except OSError:
-            return ""
-
-    def _write_bound_session(self, token: str) -> None:
-        self._agent_session_path().write_text(token or "")
+            return json.loads(self._agent_args_path().read_text())
+        except (OSError, ValueError):
+            return []
 
     def _agent_running(self) -> bool:
         pid = self.paths.read_pid()

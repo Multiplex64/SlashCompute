@@ -87,11 +87,11 @@ class AgentOptions:
         self.sandbox = sandbox_enabled(sandbox, self.cfg.sandbox)
         self.name = name or socket.gethostname().split(".")[0]
         self.coordinator = resolve_coordinator(url)
-        self.http = CoordHTTP(self.coordinator)
+        self.session_token = session_token or __import__("os").environ.get("SLASHCOMPUTE_SESSION")
+        self.http = CoordHTTP(self.coordinator, session_token=self.session_token)
         self.node_id = self.paths.node_id()
         self.data_host = resolve_data_host(localhost)
         self.data_bind = "0.0.0.0"
-        self.session_token = session_token or __import__("os").environ.get("SLASHCOMPUTE_SESSION")
 
 
 class Daemon:
@@ -246,9 +246,12 @@ class Daemon:
 
     async def _start_sandboxed(self, asg: StageAssignment, job_dir: Path) -> None:
         spec_path = job_dir / "assignment.json"
+        spec_path.touch(mode=0o600)
+        spec_path.chmod(0o600)
         spec_path.write_text(json.dumps({
             "assignment": json.loads(asg.model_dump_json()),
             "coordinator_url": self.opt.coordinator,
+            "session_token": self.opt.session_token,
             "job_dir": str(job_dir),
             "data_bind": self.opt.data_bind,
             "data_port": self.opt.data_port,

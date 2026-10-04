@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 import httpx
+import psutil
 
 from slashcompute.agent.daemon import request_stop
 from slashcompute.agent.paths import AgentPaths
@@ -27,6 +28,14 @@ class LauncherError(Exception):
 
 FINISHES = ("carbon", "poster", "signal", "thermal", "void")
 TRANSPORTS = ("direct", "relay")
+OUTDATED_COORDINATOR = ("This pool's coordinator has no LLM inference: it runs an older /compute. "
+                        "Ask whoever hosts it to update and restart it, or host a pool on this Mac.")
+
+
+def supports_inference(health: Optional[dict]) -> Optional[bool]:
+    """Whether the coordinator serves LLMs (every build since inference reports its transport in
+    /health). None while it is unreachable."""
+    return None if not health else "inference_transport" in health
 
 
 @dataclass
@@ -39,6 +48,7 @@ class LauncherSettings:
     session_token: str = ""
     grant_split: int = 0
     training: bool = True              # lend this Mac to MLX fine-tunes
+    memory_gb: int = 0                 # GiB lent to fine-tunes; 0 = automatic (what is free at start)
     inference: bool = False            # also host llama.cpp layers for the pool's LLMs
     inference_memory_gb: int = 0       # 0 = automatic (75% of RAM minus 4 GiB)
     inference_head: bool = True        # may run llama-server (needs the model file; uploads are pushed)
@@ -61,11 +71,16 @@ class LauncherSettings:
             mem = max(0, min(1024, int(self.inference_memory_gb)))
         except (TypeError, ValueError):
             mem = 0
+        try:
+            train_mem = max(0, min(1024, int(self.memory_gb)))
+        except (TypeError, ValueError):
+            train_mem = 0
         return LauncherSettings(
             mode=mode, url=str(self.url or ""), gpu_percent=gpu,
             contribute=bool(self.contribute), finish=finish,
             session_token=str(self.session_token or ""), grant_split=split,
-            training=bool(self.training), inference=bool(self.inference), inference_memory_gb=mem,
+            training=bool(self.training), memory_gb=train_mem, inference=bool(self.inference),
+            inference_memory_gb=mem,
             inference_head=bool(self.inference_head), models_dir=str(self.models_dir or "~/models"),
             transport=transport,
         )
@@ -88,6 +103,9 @@ class StatusSnapshot:
     inference_status: dict = field(default_factory=dict)   # the node's status.json
     inference_nodes: int = 0
     inference_transport: str = ""
+    inference_supported: Optional[bool] = None
+    memory_total_bytes: int = 0        # this Mac's unified memory, for the memory sliders
+    memory_available_bytes: int = 0
 
 
 PopenFn = Callable[..., Any]
@@ -108,6 +126,11 @@ def health_timeout(url: str) -> float:
     return 5.0 if (url or "").lower().startswith("https://") else 1.0
 
 
+def system_memory() -> tuple[int, int]:
+    vm = psutil.virtual_memory()
+    return int(vm.total), int(vm.available)
+
+
 def process_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
@@ -125,6 +148,7 @@ class Launcher:
         http: Optional[httpx.Client] = None,
         discover_fn: Callable[[float], Optional[str]] = discover,
         lan_ip_fn: Callable[[], str] = lan_ip,
+        memory_fn: Callable[[], tuple[int, int]] = system_memory,
     ) -> None:
         self.cfg = EngineConfig.from_env(home=home)
         if home is not None:
@@ -136,6 +160,7 @@ class Launcher:
         self._http = http or httpx.Client(follow_redirects=False)
         self._discover = discover_fn
         self._lan_ip = lan_ip_fn
+        self._memory = memory_fn
         self.last_error = ""
         self.paths = AgentPaths(self.home)
 
@@ -171,6 +196,7 @@ class Launcher:
             session_token=raw.get("session_token", ""),
             grant_split=raw.get("grant_split", 0),
             training=raw.get("training", True),
+            memory_gb=raw.get("memory_gb", 0),
             inference=raw.get("inference", False),
             inference_memory_gb=raw.get("inference_memory_gb", 0),
             inference_head=raw.get("inference_head", True),
@@ -203,12 +229,14 @@ class Launcher:
             argv.extend(["--inference-transport", transport])
         return argv
 
-    def agent_argv(self, url: str, gpu_percent: int, session_token: str = "") -> list[str]:
+    def agent_argv(self, url: str, gpu_percent: int, session_token: str = "", memory_gb: int = 0) -> list[str]:
         argv = [
             self.python, "-m", "slashcompute.agent.main", "start",
             "--url", url, "--gpu-percent", str(int(gpu_percent)),
             "--home", str(self.home),
         ]
+        if memory_gb:
+            argv.extend(["--max-memory-gb", str(int(memory_gb))])
         if session_token:
             argv.extend(["--session-token", session_token])
         return argv
@@ -356,7 +384,7 @@ class Launcher:
             request_stop(self.paths)
         if want_agent:
             token = s.session_token or os.environ.get("SLASHCOMPUTE_SESSION", "")
-            argv = self.agent_argv(agent_url, s.gpu_percent, token)
+            argv = self.agent_argv(agent_url, s.gpu_percent, token, s.memory_gb)
             if self._agent_running() and self._read_agent_args() != argv:
                 request_stop(self.paths)
                 deadline = time.monotonic() + 3.0
@@ -446,6 +474,7 @@ class Launcher:
             self.paths.clear_pid()
             agent_pid = None
         inference_pid = self.read_inference_pid()
+        mem_total, mem_free = self._memory()
         return StatusSnapshot(
             coordinator_up=bool(health),
             nodes=int(health.get("nodes", 0) or 0),
@@ -462,6 +491,9 @@ class Launcher:
             inference_status=self.inference_status() if inference_pid is not None else {},
             inference_nodes=int(health.get("inference_nodes", 0) or 0),
             inference_transport=str(health.get("inference_transport", "") or ""),
+            inference_supported=supports_inference(health),
+            memory_total_bytes=mem_total,
+            memory_available_bytes=mem_free,
         )
 
     def _read_inference_args(self) -> list[str]:

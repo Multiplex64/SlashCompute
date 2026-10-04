@@ -60,7 +60,9 @@ def benchmark(max_memory_bytes: int | None = None) -> DeviceProfile:
     working = max(int(total * 0.75), available)
     contrib = available
     if max_memory_bytes is not None:
-        contrib = min(contrib, int(max_memory_bytes))
+        # The owner chose an amount: honour it even above what is free right now (macOS compresses or
+        # pages out idle apps), but never past the GPU working set.
+        contrib = min(int(max_memory_bytes), working)
     contrib = max(contrib, 64 * 1024 * 1024)
     return DeviceProfile(
         chip=chip_name(),

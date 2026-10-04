@@ -49,8 +49,12 @@ def _launcher(tmp_path, health=None):
     return launcher, spawned
 
 
-def _shell(tmp_path, handler):
-    launcher, _ = _launcher(tmp_path, {"ok": True})
+CURRENT = {"ok": True, "inference_nodes": 0, "inference_transport": "direct"}
+OUTDATED = {"ok": True, "nodes": 4, "jobs": 1}   # /health of a coordinator from before LLM inference
+
+
+def _shell(tmp_path, handler, health=CURRENT):
+    launcher, _ = _launcher(tmp_path, health)
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     return create_shell(launcher, stream_client=client)
 
@@ -119,6 +123,30 @@ def test_upload_streams_the_file_to_the_coordinator(tmp_path):
     assert r.status_code == 200 and r.json()["size"] == len(data)
     assert seen["url"] == "http://127.0.0.1:8765/inference/models/upload?name=m.gguf"
     assert seen["body"] == data
+
+
+def test_outdated_coordinator_is_explained_before_anything_is_sent(tmp_path):
+    seen = []
+
+    def handler(request):
+        seen.append(str(request.url))
+        return httpx.Response(404, json={"detail": "Not Found"})
+
+    with TestClient(_shell(tmp_path, handler, OUTDATED)) as c:
+        up = c.post("/api/models/upload", content=b"GGUF" + bytes(1000), headers={"x-filename": "m.gguf"})
+        chat = c.post("/api/chat", json={"model": "m", "messages": []})
+        status = c.get("/api/status").json()
+    assert up.status_code == chat.status_code == 409
+    assert "older /compute" in up.json()["detail"] and "older /compute" in chat.json()["detail"]
+    assert seen == []                                   # the GGUF never left this Mac
+    assert status["inference_supported"] is False
+
+
+def test_inference_support_follows_coordinator_health(tmp_path):
+    for health, expected in ((CURRENT, True), (OUTDATED, False), (None, None)):
+        launcher, _ = _launcher(tmp_path, health)
+        launcher.save_settings(LauncherSettings(mode="join", url="10.0.0.5"))
+        assert launcher.snapshot().inference_supported is expected
 
 
 # ------------------------------------------------------------ launcher

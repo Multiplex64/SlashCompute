@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import signal
@@ -29,6 +30,15 @@ from slashcompute.common.protocol import (
 )
 
 log = logging.getLogger(__name__)
+RECONNECT_MAX_S = 15.0
+
+
+def _rejection(e: Exception) -> str:
+    """Why the coordinator refused us for good (application close codes 4000-4999), else ""."""
+    rcvd = getattr(e, "rcvd", None)
+    if rcvd is not None and 4000 <= rcvd.code < 5000:
+        return rcvd.reason or f"close code {rcvd.code}"
+    return ""
 
 
 def resolve_coordinator(url: Optional[str]) -> str:
@@ -106,6 +116,7 @@ class Daemon:
         self._proc: Optional[asyncio.subprocess.Process] = None
         self._stop = asyncio.Event()
         self._draining = False
+        self._welcomed = False
 
     def _write_status(self) -> None:
         self.opt.paths.write_status(
@@ -140,9 +151,43 @@ class Daemon:
                      opt.gpu_percent)
 
             ws_url = _ws_url(opt.coordinator)
-            log.info("connecting to %s as %s (%s)", ws_url, opt.node_id[:8], opt.name)
-            async with websockets.connect(ws_url, max_size=64 * 1024 * 1024, ping_interval=20) as ws:
-                self._ws = ws
+            delay = 1.0
+            while not self._stop.is_set():
+                log.info("connecting to %s as %s (%s)", ws_url, opt.node_id[:8], opt.name)
+                self._welcomed = False
+                self.status = "connecting"       # shown in the app; never heartbeated (not welcomed yet)
+                self._write_status()
+                try:
+                    await self._connect_once(ws_url, device)
+                except (OSError, asyncio.TimeoutError, websockets.exceptions.WebSocketException) as e:
+                    rejected = _rejection(e)
+                    if rejected:
+                        raise SystemExit(f"coordinator refused this agent: {rejected}") from e
+                    log.warning("coordinator unreachable (%s)", e)
+                if self._welcomed:
+                    delay = 1.0                  # we were registered: a fresh outage starts a fresh backoff
+                if self._stop.is_set():
+                    break
+                if self._session or self._proc:
+                    log.info("lost the coordinator mid-stage; releasing it (the job will be rescheduled)")
+                    await self._cancel_stage()
+                log.info("reconnecting in %.0fs", delay)
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(self._stop.wait(), delay)
+                delay = min(delay * 2, RECONNECT_MAX_S)
+        finally:
+            opt.paths.clear_pid()
+            self.status = "stopped"
+            self._write_status()
+
+    async def _connect_once(self, ws_url: str, device) -> None:
+        """One coordinator connection: register, then handle messages until it closes."""
+        opt = self.opt
+        async with websockets.connect(ws_url, max_size=64 * 1024 * 1024, ping_interval=20,
+                                      open_timeout=10) as ws:
+            self._ws = ws
+            hb = None
+            try:
                 await self.send(Register(
                     node_id=opt.node_id, name=opt.name, device=device,
                     data_host=opt.data_host, data_port=opt.data_port, gpu_percent=opt.gpu_percent,
@@ -151,25 +196,23 @@ class Daemon:
                 welcome = parse_coordinator_message(await ws.recv())
                 if not isinstance(welcome, Welcome):
                     raise SystemExit(f"expected welcome, got {type(welcome).__name__}")
-                interval = welcome.heartbeat_interval_s
-                hb = asyncio.create_task(self._heartbeats(interval))
-                try:
-                    async for raw in ws:
-                        if self._stop.is_set():
-                            break
-                        try:
-                            msg = parse_coordinator_message(raw)
-                        except ValidationError as e:
-                            log.warning("bad coordinator message: %s", e)
-                            continue
-                        await self._handle(msg)
-                finally:
+                self._welcomed = True
+                self.status = "idle"
+                self._write_status()
+                hb = asyncio.create_task(self._heartbeats(welcome.heartbeat_interval_s))
+                async for raw in ws:
+                    if self._stop.is_set():
+                        break
+                    try:
+                        msg = parse_coordinator_message(raw)
+                    except ValidationError as e:
+                        log.warning("bad coordinator message: %s", e)
+                        continue
+                    await self._handle(msg)
+            finally:
+                if hb is not None:
                     hb.cancel()
-                    self._ws = None
-        finally:
-            opt.paths.clear_pid()
-            self.status = "stopped"
-            self._write_status()
+                self._ws = None
 
     async def _heartbeats(self, interval: float) -> None:
         try:

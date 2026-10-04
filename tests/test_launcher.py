@@ -405,3 +405,43 @@ def test_fetch_pool_down_and_partial(tmp_path):
     # Health answers but list endpoints return a dict: tolerated as empty lists.
     pool = _launcher(tmp_path, http=FakeHTTP({"ok": True})).fetch_pool("http://x:8765")
     assert pool.online is True and (pool.nodes, pool.jobs, pool.ledger) == ([], [], [])
+
+
+# ------------------------------------------------------------ memory lent
+
+def test_memory_setting_round_trips_clamps_and_reaches_the_agent(tmp_path):
+    launcher = _launcher(tmp_path)
+    launcher.save_settings(LauncherSettings(memory_gb=6, inference_memory_gb=10))
+    s = launcher.load_settings()
+    assert (s.memory_gb, s.inference_memory_gb) == (6, 10)
+    assert LauncherSettings(memory_gb="lots").clamp().memory_gb == 0
+    assert LauncherSettings(memory_gb=-3).clamp().memory_gb == 0
+    assert "--max-memory-gb" not in launcher.agent_argv("http://10.0.0.1:8765", 50)       # 0 = automatic
+    assert launcher.agent_argv("http://10.0.0.1:8765", 50, "", 6)[-2:] == ["--max-memory-gb", "6"]
+
+
+def test_changing_memory_restarts_the_running_agent(tmp_path, monkeypatch):
+    launcher = _launcher(tmp_path, http=FakeHTTP({"ok": True, "nodes": 0, "jobs": 0}))
+    (tmp_path / "agent" / "agent.pid").write_text("77\n")
+    (tmp_path / "agent.args").write_text(json.dumps(launcher.agent_argv("http://10.0.0.1:8765", 50)))
+    running = {77: True}
+    stopped = []
+
+    def stop(paths):
+        stopped.append(paths.read_pid())
+        running[77] = False
+        paths.clear_pid()
+        return True
+
+    monkeypatch.setattr("slashcompute.launcher.controller.process_alive", lambda pid: running.get(pid, False))
+    monkeypatch.setattr("slashcompute.launcher.controller.request_stop", stop)
+    launcher.start(LauncherSettings(mode="join", url="http://10.0.0.1:8765", memory_gb=6))
+    assert stopped == [77]
+    assert launcher._spawned[0].argv == launcher.agent_argv("http://10.0.0.1:8765", 50, "", 6)  # type: ignore
+
+
+def test_status_reports_this_macs_memory(tmp_path):
+    launcher = _launcher(tmp_path)
+    launcher._memory = lambda: (16 << 30, 5 << 30)
+    snap = launcher.snapshot()
+    assert (snap.memory_total_bytes, snap.memory_available_bytes) == (16 << 30, 5 << 30)

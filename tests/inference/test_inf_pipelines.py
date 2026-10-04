@@ -206,8 +206,13 @@ def _late_agent(port):
     from slashcompute.inference.node.config import NodeConfig
     from slashcompute.inference.node.fake_engine import FakeCluster, FakeEngine
 
+    import tempfile
+
+    from inf_harness import isolated_paths
+
     url = f"http://127.0.0.1:{port}/inference"
-    cfg = NodeConfig(coordinator_url=url, name="late", commitment=Commitment(memory_gb=16, may_be_head=True))
+    cfg = NodeConfig(coordinator_url=url, name="late", **isolated_paths(tempfile.mkdtemp(prefix="late-node-")),
+                     commitment=Commitment(memory_gb=16, may_be_head=True))
     return Agent(cfg, FakeEngine("late", FakeCluster()), info={"os": "fake", "chip": "fake"}, build="fake",
                  ip="127.0.0.1", gguf_files=[], latency_fn=None, busy_fn=lambda: False,
                  client=httpx.AsyncClient(base_url=url, timeout=5))
@@ -248,3 +253,40 @@ async def test_node_gives_up_retrying_when_stopped():
     shutdown.set()
     assert await asyncio.wait_for(joining, 2) is False
     await agent.client.aclose()
+
+
+async def test_node_reports_a_coordinator_without_inference_instead_of_stale_status():
+    """An older coordinator answers /health but 404s /inference/*: say so in status.json, keep retrying."""
+    import logging
+
+    import uvicorn
+    from fastapi import FastAPI
+
+    from inf_harness import free_port
+    from slashcompute.inference.node.__main__ import connect
+
+    old = FastAPI()
+    old.get("/health")(lambda: {"ok": True, "nodes": 0, "jobs": 0})
+    port = free_port()
+    server = uvicorn.Server(uvicorn.Config(old, host="127.0.0.1", port=port, log_level="warning"))
+    serving = asyncio.create_task(server.serve())
+    while not server.started:
+        await asyncio.sleep(0.01)
+    agent = _late_agent(port)
+    status = agent.cfg.status_file
+    with open(status, "w") as fh:   # an earlier run's leftovers
+        json.dump({"available": True, "reason": "available", "last_error": ""}, fh)
+    shutdown = asyncio.Event()
+    joining = asyncio.create_task(connect(agent, shutdown, logging.getLogger("t"), max_delay=0.2))
+    try:
+        await asyncio.sleep(0.5)
+        assert not joining.done()                    # still retrying: the coordinator may be updated
+        data = json.load(open(status))
+        assert data["available"] is False and data["reason"] == "unsupported"
+        assert "no LLM inference" in data["last_error"]
+    finally:
+        shutdown.set()
+        assert await asyncio.wait_for(joining, 2) is False
+        await agent.client.aclose()
+        server.should_exit = True
+        await serving

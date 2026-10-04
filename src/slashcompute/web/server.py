@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from dataclasses import asdict
@@ -16,7 +17,7 @@ from starlette.background import BackgroundTask
 
 from slashcompute.common.config import DEMO_MODEL_CANDIDATES, DEV_MODEL
 from slashcompute.launcher.controller import (
-    FINISHES, Launcher, LauncherError, LauncherSettings,
+    FINISHES, OUTDATED_COORDINATOR, Launcher, LauncherError, LauncherSettings, supports_inference,
 )
 from slashcompute.launcher.dashboard import PoolData, overview
 
@@ -52,6 +53,7 @@ def settings_from_body(body: dict) -> LauncherSettings:
         session_token=body.get("session_token", ""),
         grant_split=body.get("grant_split", 0),
         training=body.get("training", True),
+        memory_gb=body.get("memory_gb", 0),
         inference=body.get("inference", False),
         inference_memory_gb=body.get("inference_memory_gb", 0),
         inference_head=body.get("inference_head", True),
@@ -157,12 +159,20 @@ def create_shell(launcher: Optional[Launcher] = None,
                                  media_type=r.headers.get("content-type", "application/json"),
                                  background=BackgroundTask(r.aclose))
 
+    async def inference_base() -> str:
+        """Coordinator URL for LLM routes. An older coordinator 404s them with a bare "Not Found", so say
+        why up front, before the request (or a multi-GB upload) is sent."""
+        base = coord_base()
+        if supports_inference(await asyncio.to_thread(launch.poll_health, base)) is False:
+            raise HTTPException(409, OUTDATED_COORDINATOR)
+        return base
+
     @app.post("/api/chat")
     async def chat(request: Request):
         """Streaming chat with the pool's LLMs (OpenAI-style SSE from the coordinator)."""
         body = await request.json()
         body["stream"] = True
-        req = streams.build_request("POST", f"{coord_base()}/v1/chat/completions", json=body,
+        req = streams.build_request("POST", f"{await inference_base()}/v1/chat/completions", json=body,
                                     headers=_forward_headers(request), timeout=STREAM_TIMEOUT)
         return await relay_stream(req)
 
@@ -173,7 +183,8 @@ def create_shell(launcher: Optional[Launcher] = None,
         headers = {**_forward_headers(request), "content-type": "application/octet-stream"}
         if request.headers.get("content-length"):
             headers["content-length"] = request.headers["content-length"]
-        req = streams.build_request("POST", f"{coord_base()}/inference/models/upload", params={"name": name},
+        base = await inference_base()
+        req = streams.build_request("POST", f"{base}/inference/models/upload", params={"name": name},
                                     content=request.stream(), headers=headers, timeout=STREAM_TIMEOUT)
         return await relay_stream(req)
 

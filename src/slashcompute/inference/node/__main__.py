@@ -11,6 +11,7 @@ import socket
 from pathlib import Path
 from typing import Optional
 
+import httpx
 import typer
 
 from slashcompute.common.config import EngineConfig
@@ -45,6 +46,22 @@ def coordinator_url(url: str) -> str:
     return url if url.endswith(PREFIX) else url + PREFIX
 
 
+async def connect(agent, shutdown: asyncio.Event, log, max_delay: float = 15.0) -> bool:
+    """Reach the coordinator, retrying with backoff (it may still be starting). False if told to stop."""
+    delay = 1.0
+    while not shutdown.is_set():
+        try:
+            await agent.measure_rtt()
+            await agent.register()
+            return True
+        except httpx.HTTPError as e:
+            log.warning("coordinator not reachable yet (%s); retrying in %.0fs", e, delay)
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(shutdown.wait(), delay)
+        delay = min(delay * 2, max_delay)
+    return False
+
+
 def auto_memory_gb(total_bytes: int) -> float:
     total = (total_bytes or 16 * GIB) / GIB
     return float(max(2, round(total * 0.75 - 4)))
@@ -71,6 +88,11 @@ async def run_node(cfg: NodeConfig, home: Path, fake: bool = False) -> None:
     from slashcompute.inference.node.agent import Agent, load_state, save_state, scan_models
 
     log = setup_logging("slashcompute.inference.node")
+    shutdown = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        with contextlib.suppress(NotImplementedError):
+            loop.add_signal_handler(sig, shutdown.set)
     info = hardware.detect()
     if fake:
         from slashcompute.inference.node.fake_engine import FakeCluster, FakeEngine
@@ -96,8 +118,8 @@ async def run_node(cfg: NodeConfig, home: Path, fake: bool = False) -> None:
     state = load_state(cfg.state_file)
     agent = Agent(cfg, engine, info=info, build=build, ip=cfg.ip, gguf_files=files, latency_fn=latency.measure,
                   state=state, probe_fn=latency.serve_probe)
-    await agent.measure_rtt()
-    await agent.register()
+    if not await connect(agent, shutdown, log):
+        return
     engine.node_id = agent.node_id
     log.info("%s on %s, llama.cpp %s, %s transport (RTT %.0f ms), commits %.0f GiB, %d model(s) on disk",
              cfg.name, info["chip"], build, agent.transport, agent.rtt_ms or 0, cfg.commitment.memory_gb, len(files))
@@ -114,11 +136,6 @@ async def run_node(cfg: NodeConfig, home: Path, fake: bool = False) -> None:
     save_state(cfg.state_file, agent.state)
     await agent.start(bench)
     agent.write_status()
-    shutdown = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        with contextlib.suppress(NotImplementedError):
-            loop.add_signal_handler(sig, shutdown.set)
     try:
         await shutdown.wait()
         log.info("shutting down: leaving the network and stopping llama.cpp processes")

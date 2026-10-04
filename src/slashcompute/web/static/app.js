@@ -4,8 +4,11 @@
 const T = 1e12;
 const SETTING_KEYS = [
   "mode", "url", "gpu_percent", "contribute", "finish", "session_token", "grant_split",
-  "training", "inference", "inference_memory_gb", "inference_head", "models_dir", "transport",
+  "training", "memory_gb", "inference", "inference_memory_gb", "inference_head", "models_dir", "transport",
 ];
+const GIB = 1024 ** 3;
+const OUTDATED_COORDINATOR = "This pool's coordinator has no LLM inference: it runs an older /compute. "
+  + "Ask whoever hosts it to update and restart it, or host a pool on this Mac.";
 const STATUS_TONE = {
   running: "ok", completed: "line", starting: "line", queued: "warn", recovering: "warn",
   failed: "hot", cancelled: "",
@@ -130,6 +133,26 @@ function renderOnce(key, data, el, html) {
 function rangeFill(el) {
   const pct = ((el.value - el.min) / (el.max - el.min)) * 100;
   el.style.setProperty("--pct", `${pct}%`);
+}
+
+// ------------------------------------------------------------ memory sliders
+
+// Both sliders stop at the GPU working set (75% of RAM); 0 is "Auto".
+function memoryLimits() {
+  const st = status();
+  const total = (Number(st.memory_total_bytes) || 16 * GIB) / GIB;
+  return { total, cap: Math.max(1, Math.round(total * 0.75)), free: (Number(st.memory_available_bytes) || 0) / GIB };
+}
+
+const trainingAutoGb = () => Math.min(memoryLimits().free, memoryLimits().cap);   // what is free at start
+const inferenceAutoGb = () => Math.max(2, Math.round(memoryLimits().total * 0.75 - 4));
+const memLabel = (gb, autoGb) => (gb ? `${gb} GB` : `Auto · ≈${Math.round(autoGb)} GB`);
+
+function syncMemSlider(el, out, saved, autoGb) {
+  el.max = String(Math.max(memoryLimits().cap, Number(saved) || 0));
+  if (document.activeElement !== el && saved != null) el.value = saved;
+  rangeFill(el);
+  out.textContent = memLabel(Number(el.value), autoGb);
 }
 
 function toast(text, tone = "ok") {
@@ -391,6 +414,12 @@ function renderContributions() {
   setText("#gpu-hint", running && live && live !== Number(gpu.value)
     ? `Running at ${live}%. The new share applies next time you start.`
     : "Higher shares earn credits faster but leave less GPU for you.");
+
+  syncMemSlider($("#mem"), $("#mem-out"), s.memory_gb, trainingAutoGb());
+  const lent = m.node && m.node.memory_contrib_bytes;
+  setText("#mem-hint", running && lent
+    ? `Lending ${fmtBytes(lent)} now. A new amount applies next time you start.`
+    : `Auto lends what is free when you start. Up to ${memoryLimits().cap} GB; more than is free makes macOS squeeze other apps.`);
 
   const split = $("#split");
   if (document.activeElement !== split) split.value = c.split;
@@ -685,8 +714,10 @@ function renderLlm() {
   const pipe = net && net.pipelines.find((p) => p.model === l.model && !["stopped", "broken"].includes(p.state));
   const live = st.inference_transport || (net && net.transport) || "";
 
-  setTag("#l-pill", !up ? "Offline" : l.models.length ? `${plural(l.models.length, "model")} ready` : "No models yet",
-    !up ? "hot" : l.models.length ? "ok" : "warn");
+  const unsupported = up && st.inference_supported === false;
+  setTag("#l-pill", !up ? "Offline" : unsupported ? "Pool has no LLMs"
+    : l.models.length ? `${plural(l.models.length, "model")} ready` : "No models yet",
+  !up || unsupported ? "hot" : l.models.length ? "ok" : "warn");
   setText("#l-models", String(l.models.length));
   setText("#l-models-sub", net ? `${plural(net.models.length, "known model")}, ${l.models.length} ready` : "ready to chat");
   setText("#l-nodes", String(serving.length));
@@ -706,7 +737,7 @@ function renderLlm() {
 
   const catalog = net ? net.models : [];
   setText("#l-count", String(catalog.length));
-  renderOnce("llm-catalog", catalog, $("#l-catalog"), () => catalog.length ? catalog.map((m) => {
+  renderOnce("llm-catalog", [catalog, up, unsupported], $("#l-catalog"), () => catalog.length ? catalog.map((m) => {
     const dl = Object.entries(m.downloading || {}).map(([n, f]) => `${n} ${Math.round(f * 100)}%`).join(", ");
     const tone = m.status === "rejected" ? "is-waiting" : m.servable ? "is-active" : "";
     const where = m.status === "rejected" ? (m.status_reason || "rejected")
@@ -714,15 +745,16 @@ function renderLlm() {
     const del = m.uploaded ? `<button type="button" class="btn ghost sm" data-act="llm-delete" data-model="${esc(m.id)}">Remove</button>` : "";
     return `<div class="job ${tone}"><div class="job-top"><b>${esc(m.id)}</b>${del}</div>
       <p class="meta">${esc(m.size_gb)} GB${m.arch ? ` · ${esc(m.arch)}` : ""} · ${esc(where)}</p></div>`;
-  }).join("") : `<p class="empty">${up ? "No models yet. Upload a GGUF, or put one in a head's models folder." : "Start or join a pool first."}</p>`);
+  }).join("") : `<p class="empty">${unsupported ? esc(OUTDATED_COORDINATOR)
+    : up ? "No models yet. Upload a GGUF, or put one in a head's models folder." : "Start or join a pool first."}</p>`);
 
   const up_ = l.upload;
   $("#l-upbar").hidden = !up_;
   if (up_) $("#l-upbar i").style.width = `${Math.round(up_.pct * 100)}%`;
-  $("#l-pick").classList.toggle("is-disabled", !!up_ || !up);
+  $("#l-pick").classList.toggle("is-disabled", !!up_ || !up || unsupported);
 
   setTag("#l-pipe-tag", pipe ? pipe.state : "None", pipe && pipe.state === "active" ? "ok" : "");
-  renderOnce("llm-pipe", pipe || null, $("#l-pipe"), () => pipe ? `
+  renderOnce("llm-pipe", [pipe || null, !!l.model], $("#l-pipe"), () => pipe ? `
     <table class="macs">
       <thead><tr><th>Mac</th><th>Role</th><th>Layers</th><th>Share</th><th>Memory</th></tr></thead>
       <tbody>${pipe.members.map((m) => `<tr>
@@ -740,8 +772,10 @@ function renderLlm() {
   setText("#l-detail", running
     ? `${plural((n.models || []).length, "model")} on disk${Object.keys(n.downloads || {}).length ? ", downloading" : ""}. ${n.last_error || ""}`
     : "Lend memory to run LLM layers. Uploaded models are pushed here if this Mac may head.");
-  const mem = $("#l-mem");
-  if (document.activeElement !== mem && s.inference_memory_gb != null) mem.value = s.inference_memory_gb;
+  syncMemSlider($("#l-mem"), $("#l-mem-out"), s.inference_memory_gb, inferenceAutoGb());
+  setText("#l-mem-hint", running
+    ? "A new amount applies next time you start serving."
+    : `Auto lends 75% of RAM minus 4 GB. Up to ${memoryLimits().cap} GB.`);
   const dir = $("#l-dir");
   if (document.activeElement !== dir && s.models_dir) dir.value = s.models_dir;
   $$("#l-role button").forEach((b) => b.classList.toggle("is-on", (b.dataset.llmHead === "1") === (s.inference_head !== false)));
@@ -840,9 +874,15 @@ async function sendChat() {
 function uploadModel(file) {
   const l = state.llm;
   if (!/\.gguf$/i.test(file.name)) return setMsg("#l-upmsg", "Pick a .gguf model file.", "bad");
+  if (status().inference_supported === false) return setMsg("#l-upmsg", OUTDATED_COORDINATOR, "bad");
+  const pooled = ((l.net && l.net.nodes) || []).filter((n) => n.online).reduce((sum, n) => sum + (Number(n.committed_gb) || 0), 0);
+  const needs = file.size / GIB;
+  const tooBig = l.net && needs > pooled
+    ? `Heads-up: its weights alone need ≈${needs.toFixed(1)} GB but the pool's Macs lend ${pooled.toFixed(1)} GB in total. `
+      + "It will upload, but won't load until more memory joins." : "";
   l.upload = { name: file.name, pct: 0 };
   setText("#l-file-name", file.name);
-  setMsg("#l-upmsg", "", "");
+  setMsg("#l-upmsg", tooBig, tooBig ? "warn" : "");
   const xhr = new XMLHttpRequest();   // fetch() has no upload progress
   xhr.open("POST", "/api/models/upload");
   xhr.withCredentials = true;
@@ -853,7 +893,8 @@ function uploadModel(file) {
     try { data = JSON.parse(xhr.responseText); } catch { /* plain text */ }
     l.upload = null;
     if (xhr.status >= 200 && xhr.status < 300) {
-      setMsg("#l-upmsg", `${data.name}: ${data.layers} layers, sent to ${plural(data.pushed, "head")}.`, "ok");
+      setMsg("#l-upmsg", `${data.name}: ${data.layers} layers, sent to ${plural(data.pushed, "head")}. ${tooBig}`.trim(),
+        tooBig ? "warn" : "ok");
     } else {
       setMsg("#l-upmsg", (data && (data.detail || (data.error && data.error.message))) || xhr.statusText || "Upload failed.", "bad");
     }
@@ -1076,6 +1117,15 @@ $("#gpu").addEventListener("change", async (e) => {
   render();
 });
 
+$("#mem").addEventListener("input", (e) => {
+  rangeFill(e.target);
+  setText("#mem-out", memLabel(Number(e.target.value), trainingAutoGb()));
+});
+$("#mem").addEventListener("change", async (e) => {
+  await saveSettings({ memory_gb: Number(e.target.value) });
+  render();
+});
+
 $("#split").addEventListener("input", (e) => {
   state.settings = { ...state.settings, grant_split: Number(e.target.value) };
   renderContributions();
@@ -1186,7 +1236,14 @@ $("#auth-form").addEventListener("submit", (e) => {
 });
 
 $("#l-model").addEventListener("change", (e) => { state.llm.model = e.target.value; renderLlm(); });
-$("#l-mem").addEventListener("change", (e) => saveSettings({ inference_memory_gb: Math.max(0, Math.round(Number(e.target.value) || 0)) }));
+$("#l-mem").addEventListener("input", (e) => {
+  rangeFill(e.target);
+  setText("#l-mem-out", memLabel(Number(e.target.value), inferenceAutoGb()));
+});
+$("#l-mem").addEventListener("change", async (e) => {
+  await saveSettings({ inference_memory_gb: Number(e.target.value) });
+  render();
+});
 $("#l-dir").addEventListener("change", (e) => saveSettings({ models_dir: e.target.value.trim() || "~/models" }));
 $("#l-file").addEventListener("change", (e) => {
   const f = e.target.files[0];

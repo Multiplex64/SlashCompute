@@ -102,7 +102,7 @@ uv run slashcompute-agent status
 uv run slashcompute-agent stop
 ```
 
-`--max-memory-gb` caps how much unified memory the node lends. `--no-sandbox` disables `sandbox-exec` around the worker (useful while debugging).
+`--max-memory-gb` sets how much unified memory the node lends (default: what is free when it starts; at most 75% of RAM). In the app, use the **Memory lent** slider on **Contribute this Mac**. `--no-sandbox` disables `sandbox-exec` around the worker (useful while debugging).
 
 ## LLMs (chat with a model split across Macs)
 
@@ -115,7 +115,7 @@ brew install cmake
 ./scripts/build_llama.sh
 ```
 
-Then use the **Serve LLMs on this Mac** card (memory, models folder, head or worker) and press Start serving. Add models with **Upload GGUF**. The file is pushed to every head-capable Mac, or you can drop `.gguf` files into a head's models folder (default `~/models`). `./scripts/fetch_smoke_model.sh` grabs a tiny one.
+Then use the **Serve LLMs on this Mac** card (memory slider, models folder, head or worker) and press Start serving. LLMs need a coordinator built with inference: joining an older one shows "Pool has no LLMs" until its host updates it. Add models with **Upload GGUF**. The file is pushed to every head-capable Mac, or you can drop `.gguf` files into a head's models folder (default `~/models`). `./scripts/fetch_smoke_model.sh` grabs a tiny one.
 
 From the terminal:
 

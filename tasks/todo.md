@@ -1,27 +1,47 @@
-# Fix confirmed public-pool and launcher bugs
+# Clear inference errors, memory controls, and agent/test robustness
 
-Base: GitHub main at c9d471f. Branch: codex/fix-public-pool-access.
+Base: GitHub main at 6034d56. Branch: fix/inference-errors-and-memory.
 
-- [x] Fetch latest main and create an isolated fix branch.
-- [x] Enforce owner/admin access to private training jobs and allow authenticated assigned agents to transfer required data.
-- [x] Authenticate uploads before persisting data and remove failed submission files.
-- [x] Require a valid user session for public-pool inference; retain anonymous LAN behavior.
-- [x] Restart training agents when effective pool, GPU, or session settings change, with graceful drain handling.
-- [x] Add regression tests and verify authorized training/inference workflows still work.
-- [x] Run the relevant tests and full suite; compare any failure with the base commit.
-- [x] Review the final diff.
-- [x] Commit, push, and create a PR targeting main.
+Trigger: uploading a 16.8 GB qwen35 GGUF while joined to a coordinator built before PR #4 failed
+with a bare "Not Found"; the GGUF itself parses fine.
 
-Implementation plan: keep access checks in the coordinator, pass session credentials through the existing agent HTTP client (including sandboxed workers), and preserve LAN compatibility. Compare effective launcher arguments rather than just the session token. Run focused tests first, then the full suite. The known base failure is tests/test_pipeline.py::test_pipeline_matches_single_stage_reference.
+- [x] Coordinator capability: launcher reports `inference_supported` from /health; the shell refuses
+      model upload and chat with a clear "this coordinator predates LLM inference" error (409)
+      before streaming any bytes; the LLMs tab explains it instead of "No models yet".
+- [x] Inference node: while it cannot register, write status.json (connecting / unsupported +
+      reason) instead of leaving a stale "available" from an older run; 404 on /inference/ping
+      logs "coordinator has no LLM inference (update it)".
+- [x] Training agent: reconnect with backoff when the coordinator is down or restarts, instead
+      of exiting with a traceback (seen at 13:23 and 13:25 in agent.log).
+- [x] Memory controls: report this Mac's RAM; training gets a `memory_gb` setting (0 = auto)
+      passed as --max-memory-gb and honoured up to the Metal working set; both training and LLM
+      memory become sliders sized to the Mac with an "Auto (N GB)" stop.
+- [x] Tests: inference harness and late-agent test isolate status/agent files (they wrote to the
+      real ~/.slashcompute/inference/status.json and read the real agent status).
+- [x] Regression tests for each item; full suite; compare with the known base failure
+      tests/test_pipeline.py::test_pipeline_matches_single_stage_reference.
+- [x] Review the diff.
 
 ## Results
 
-PR: https://github.com/RizzyRoger/SlashCompute/pull/6 (base: main; head: darrenyoungblood12345-a11y:codex/fix-public-pool-access).
+Full suite: 277 passed, 1 failed in 69.79 s. The failure is the known training-loss assertion at
+tests/test_pipeline.py:56 with identical numbers on main (6.274 vs 6.088). 9 new tests: unsupported
+coordinator (node status, shell 409 with nothing forwarded, launcher capability), agent reconnect after a
+1012 restart and stop on a 4003 refusal (both fail on the old daemon), memory setting round trip / argv /
+restart-on-change / benchmark honouring the choice, RAM in status. No file under ~/.slashcompute changed
+during the run.
 
-Full suite: 268 passed, 1 failed in 65.17 seconds. The failure is the existing training-loss assertion at tests/test_pipeline.py:56 (6.274164438247681 is not below 6.087780237197876), reproduced on main before these changes. No pipeline code or existing pipeline tests changed.
+Also fixed while verifying in the browser: the LLM model list and pipeline card cached their empty-state
+text by data alone, so "Start or join a pool first." stuck after joining; their render keys now include
+the state that text depends on.
 
-Focused suites also passed: training access/security/public pool/coordinator (33), launcher (28), agent authentication/runtime (14), and mounted inference (19). New checks cover anonymous/invalid/banned sessions, owner/admin/assigned-worker access, private server-path copying, checkpoint transfer and assignment expiry, verification access after completion, upload cleanup, paid public chat, LAN compatibility, effective environment credentials, graceful restarts, and credential file permissions.
+Checked in a browser against the real pre-inference coordinator at 10.171.167.131 (shell on a temp home):
+pill "Pool has no LLMs", explanation in the model list, upload disabled, both memory sliders sized to the
+16 GB Mac (max 12 GB) and saving on release.
 
-Review additionally closed a verification-file access gap: a completed verification cannot authorize a newly registered owner of the old node ID. Non-admin public callers must upload their own dataset instead of choosing a server path.
+Not done: the installed /Applications/compute.app bundles its own copy, so these fixes reach it only
+after the app is rebuilt.
 
-Tests used temporary data and local processes/fake inference nodes. Real cross-Mac inference and a rebuilt DMG were outside this change.
+## Previous: Fix confirmed public-pool and launcher bugs (PR #6, merged)
+
+Full suite at that time: 268 passed, 1 failed (the known pipeline loss assertion, reproduced on main).

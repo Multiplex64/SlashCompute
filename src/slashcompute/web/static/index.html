@@ -101,6 +101,11 @@
               <input type="range" id="gpu" min="1" max="100" value="50">
               <p class="hint" id="gpu-hint"></p>
             </div>
+            <div class="field">
+              <div class="field-head"><label for="mem">Memory lent</label><output id="mem-out">Auto</output></div>
+              <input type="range" id="mem" min="0" max="12" step="1" value="0">
+              <p class="hint" id="mem-hint"></p>
+            </div>
             <div id="c-mac"></div>
             <button type="button" class="btn primary block" id="c-toggle" data-act="toggle-contribute">Start contributing</button>
           </article>
@@ -360,10 +365,12 @@
             <header class="card-head"><h2>Serve LLMs on this Mac</h2></header>
             <div class="state"><i class="sq" id="l-dot"></i><b id="l-state">Not serving</b></div>
             <p class="muted" id="l-detail"></p>
-            <div class="field-pair">
-              <div class="field"><label for="l-mem">Memory (GB)</label><input type="number" id="l-mem" min="0" max="1024" value="0"></div>
-              <div class="field"><label for="l-dir">Models folder</label><input type="text" id="l-dir" value="~/models" spellcheck="false" autocomplete="off"></div>
+            <div class="field">
+              <div class="field-head"><label for="l-mem">Memory lent</label><output id="l-mem-out">Auto</output></div>
+              <input type="range" id="l-mem" min="0" max="12" step="1" value="0">
+              <p class="hint" id="l-mem-hint"></p>
             </div>
+            <div class="field"><label for="l-dir">Models folder</label><input type="text" id="l-dir" value="~/models" spellcheck="false" autocomplete="off"></div>
             <div class="field">
               <label>Role</label>
               <div class="seg" id="l-role">
@@ -379,7 +386,7 @@
               </div>
             </div>
             <button type="button" class="btn primary block" id="l-toggle" data-act="toggle-llm">Start serving</button>
-            <p class="hint" id="l-hint">Memory 0 = automatic. Training on this Mac takes priority: LLM work pauses while a fine-tune runs here.</p>
+            <p class="hint" id="l-hint">Training on this Mac takes priority: LLM work pauses while a fine-tune runs here.</p>
           </article>
         </div>
       </section>

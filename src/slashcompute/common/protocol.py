@@ -16,7 +16,7 @@ class DeviceProfile(BaseModel):
     memory_total_bytes: int
     memory_available_bytes: int
     working_set_bytes: int
-    # What the contributor is willing to lend (after any --max-memory-gb cap).
+    # What the contributor lends: what is free, or the --max-memory-gb choice (at most the working set).
     memory_contrib_bytes: int
     matmul_tflops: float
     mem_bandwidth_gbps: float

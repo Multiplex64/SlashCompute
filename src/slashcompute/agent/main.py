@@ -25,7 +25,8 @@ def start(
     url: Optional[str] = typer.Option(None, help="Coordinator URL (default: LAN mDNS)"),
     gpu_percent: int = typer.Option(50, min=1, max=100, help="Fraction of time spent computing"),
     data_port: int = typer.Option(9700, help="TCP port peers dial for activations/gradients"),
-    max_memory_gb: Optional[float] = typer.Option(None, help="Cap contributed unified memory"),
+    max_memory_gb: Optional[float] = typer.Option(
+        None, help="GiB of unified memory to lend (default: what is free at start; at most 75% of RAM)"),
     localhost: bool = typer.Option(False, help="Advertise 127.0.0.1 (same-machine cluster)"),
     sandbox: Optional[bool] = typer.Option(None, help="Run the worker under sandbox-exec"),
     no_sandbox: bool = typer.Option(False, help="Disable the macOS sandbox"),

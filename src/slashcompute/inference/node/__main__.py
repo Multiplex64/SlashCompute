@@ -46,6 +46,15 @@ def coordinator_url(url: str) -> str:
     return url if url.endswith(PREFIX) else url + PREFIX
 
 
+def connect_problem(e: httpx.HTTPError) -> tuple[str, str]:
+    """(status reason, message) for a failed join. A 404 means the coordinator answers but predates
+    LLM inference: waiting will not help until it is updated."""
+    if isinstance(e, httpx.HTTPStatusError) and e.response.status_code == 404:
+        return "unsupported", ("the coordinator has no LLM inference (it runs an older /compute); "
+                               "update and restart it")
+    return "connecting", f"coordinator not reachable yet ({e})"
+
+
 async def connect(agent, shutdown: asyncio.Event, log, max_delay: float = 15.0) -> bool:
     """Reach the coordinator, retrying with backoff (it may still be starting). False if told to stop."""
     delay = 1.0
@@ -53,9 +62,15 @@ async def connect(agent, shutdown: asyncio.Event, log, max_delay: float = 15.0) 
         try:
             await agent.measure_rtt()
             await agent.register()
+            agent.last_available, agent.last_reason, agent.last_error = False, "joining", ""
+            agent.write_status()
             return True
         except httpx.HTTPError as e:
-            log.warning("coordinator not reachable yet (%s); retrying in %.0fs", e, delay)
+            reason, msg = connect_problem(e)
+            # The shell shows status.json: never leave an older run's "available" there while not joined.
+            agent.last_available, agent.last_reason, agent.last_error = False, reason, msg
+            agent.write_status()
+            log.warning("%s; retrying in %.0fs", msg, delay)
         with contextlib.suppress(asyncio.TimeoutError):
             await asyncio.wait_for(shutdown.wait(), delay)
         delay = min(delay * 2, max_delay)

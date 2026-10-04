@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import socket
+import tempfile
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional
@@ -39,6 +40,13 @@ def free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+def isolated_paths(home: str) -> dict:
+    """Every NodeConfig path under ``home``: the defaults point at the real ~/.slashcompute and ~/models."""
+    return dict(models_dir=f"{home}/models", download_dir=f"{home}/downloads",
+                state_file=f"{home}/node_state.json", status_file=f"{home}/status.json",
+                agent_status_file=f"{home}/agent/status.json")
 
 
 def fast_settings(**overrides) -> InferenceSettings:
@@ -91,9 +99,9 @@ class Harness:
         registry.store_layout(self.conn, layout.name, layout, "synthetic", size_bytes=layout.file_bytes)
 
     def node_config(self, spec: FakeNode, **kw) -> NodeConfig:
-        home = f"{self.tmp}/{spec.name}" if self.tmp else None
-        extra = dict(models_dir=f"{home}/models", download_dir=f"{home}/downloads",
-                     status_file=f"{home}/status.json", agent_status_file=f"{home}/agent/status.json") if home else {}
+        if self.tmp is None:
+            self.tmp = tempfile.mkdtemp(prefix="inf-harness-")
+        extra = isolated_paths(f"{self.tmp}/{spec.name}")
         return NodeConfig(coordinator_url=self.node_url, name=spec.name, **{**extra, **kw}, commitment=Commitment(
             memory_gb=spec.memory_gb, hours=spec.hours, allowed_models=spec.allowed_models,
             may_be_head=spec.may_be_head))

@@ -198,3 +198,53 @@ async def test_requests_during_a_drain_wait_instead_of_failing():
         assert {m["node"] for m in during.json()["network"]["members"]} == {"studio", "pc"}
     finally:
         await h.stop()
+
+
+
+def _late_agent(port):
+    from slashcompute.inference.node.agent import Agent
+    from slashcompute.inference.node.config import NodeConfig
+    from slashcompute.inference.node.fake_engine import FakeCluster, FakeEngine
+
+    url = f"http://127.0.0.1:{port}/inference"
+    cfg = NodeConfig(coordinator_url=url, name="late", commitment=Commitment(memory_gb=16, may_be_head=True))
+    return Agent(cfg, FakeEngine("late", FakeCluster()), info={"os": "fake", "chip": "fake"}, build="fake",
+                 ip="127.0.0.1", gguf_files=[], latency_fn=None, busy_fn=lambda: False,
+                 client=httpx.AsyncClient(base_url=url, timeout=5))
+
+
+async def test_node_waits_for_a_coordinator_that_is_still_starting():
+    """The launcher may start the node before the coordinator answers: keep retrying, then join."""
+    import logging
+
+    from inf_harness import Harness, free_port
+    from slashcompute.inference.node.__main__ import connect
+    from slashcompute.inference.node.fake_engine import FakeCluster
+
+    port = free_port()
+    agent = _late_agent(port)
+    joining = asyncio.create_task(connect(agent, asyncio.Event(), logging.getLogger("t"), max_delay=0.2))
+    await asyncio.sleep(0.5)
+    assert not joining.done()                        # nothing listening yet: still retrying
+    h = await Harness(fast_settings(), FakeCluster()).start(port)
+    try:
+        assert await asyncio.wait_for(joining, 10) is True
+        assert agent.node_id in {r["id"] for r in h.conn.execute("SELECT id FROM nodes")}
+    finally:
+        await agent.client.aclose()
+        await h.stop()
+
+
+async def test_node_gives_up_retrying_when_stopped():
+    import logging
+
+    from inf_harness import free_port
+    from slashcompute.inference.node.__main__ import connect
+
+    agent = _late_agent(free_port())
+    shutdown = asyncio.Event()
+    joining = asyncio.create_task(connect(agent, shutdown, logging.getLogger("t"), max_delay=0.2))
+    await asyncio.sleep(0.3)
+    shutdown.set()
+    assert await asyncio.wait_for(joining, 2) is False
+    await agent.client.aclose()

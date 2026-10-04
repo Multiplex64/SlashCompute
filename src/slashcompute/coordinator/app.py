@@ -20,17 +20,25 @@ from slashcompute.common.config import EngineConfig
 from slashcompute.common.protocol import Register, dump, parse_agent_message
 from slashcompute.coordinator.core import MAX_DATASET_BYTES, Coordinator
 from slashcompute.coordinator.db import Verification
+from slashcompute.coordinator.inference_accounting import CoreAccounting
+from slashcompute.inference.config import InferenceSettings
+from slashcompute.inference.coordinator.service import InferenceService, mount
 from slashcompute.jobs import parse_spec
 
 log = logging.getLogger(__name__)
 
 
-def create_app(cfg: EngineConfig, advertise: bool = False) -> FastAPI:
+def create_app(cfg: EngineConfig, advertise: bool = False,
+               inference: Optional[InferenceSettings] = None) -> FastAPI:
     core = Coordinator(cfg)
+    inf = inference or InferenceSettings.from_env(
+        DB_PATH=str(cfg.home / "inference.sqlite3"), MODELS_DIR=str(cfg.home / "models"))
+    svc = InferenceService(inf, CoreAccounting(core))
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         core.start()
+        svc.start()
         adv = None
         if advertise:
             try:
@@ -42,10 +50,13 @@ def create_app(cfg: EngineConfig, advertise: bool = False) -> FastAPI:
         yield
         if adv:
             adv.close()
+        await svc.stop()
         await core.stop()
 
     app = FastAPI(title="/compute coordinator", lifespan=lifespan)
     app.state.core = core
+    app.state.inference = svc
+    mount(app, svc)
 
     @app.middleware("http")
     async def session_cookie(request: Request, call_next):
@@ -105,8 +116,8 @@ def create_app(cfg: EngineConfig, advertise: bool = False) -> FastAPI:
             node_id = first.node_id
             try:
                 await core.on_register(first, send)
-            except PermissionError:
-                await ws.close(code=4003, reason="banned")
+            except PermissionError as e:
+                await ws.close(code=4003, reason=str(e)[:123] or "banned")
                 return
             while True:
                 raw = await ws.receive_text()
@@ -137,6 +148,8 @@ def create_app(cfg: EngineConfig, advertise: bool = False) -> FastAPI:
     async def submit_job(body: dict, request: Request,
                          authorization: Optional[str] = Header(default=None)):
         user = _user(request, authorization)
+        if core.cfg.public_pool and user is None:
+            raise HTTPException(401, "Sign in first.")
         if _token(request, authorization) and user is None:
             raise HTTPException(401, "Sign in first.")
         try:
@@ -176,13 +189,18 @@ def create_app(cfg: EngineConfig, advertise: bool = False) -> FastAPI:
             buf.extend(chunk)
         dest.write_bytes(bytes(buf))
         user = _user(request, authorization)
+        if core.cfg.public_pool and user is None:
+            raise HTTPException(401, "Sign in first.")
         if _token(request, authorization) and user is None:
             raise HTTPException(401, "Sign in first.")
+        if core.cfg.public_pool:
+            min_stages = 1
         try:
             spec = parse_spec({
                 "kind": "lora_finetune", "model": model, "dataset_path": str(dest),
                 "steps": steps, "min_stages": min_stages,
                 "batch_size": batch_size, "microbatches": microbatches,
+                **({"max_stages": 1} if core.cfg.public_pool else {}),
             })
             job = core.submit(spec)
         except (ValidationError, ValueError, FileNotFoundError) as e:
@@ -295,6 +313,7 @@ def create_app(cfg: EngineConfig, advertise: bool = False) -> FastAPI:
 
     @app.get("/health")
     async def health():
-        return {"ok": True, "nodes": len(core.registry.nodes), "jobs": len(core.jobs)}
+        return {"ok": True, "nodes": len(core.registry.nodes), "jobs": len(core.jobs),
+                "inference_nodes": len(svc.online), "inference_transport": svc.s.TRANSPORT}
 
     return app

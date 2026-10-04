@@ -2,7 +2,10 @@
 // forms are static markup, so polling never clobbers what you are typing.
 
 const T = 1e12;
-const SETTING_KEYS = ["mode", "url", "gpu_percent", "contribute", "finish", "session_token", "grant_split"];
+const SETTING_KEYS = [
+  "mode", "url", "gpu_percent", "contribute", "finish", "session_token", "grant_split",
+  "training", "inference", "inference_memory_gb", "inference_head", "models_dir", "transport",
+];
 const STATUS_TONE = {
   running: "ok", completed: "line", starting: "line", queued: "warn", recovering: "warn",
   failed: "hot", cancelled: "",
@@ -28,6 +31,15 @@ const state = {
   credits: null,
   authMode: "login",
   terms: "",
+  llm: {
+    net: null,          // /inference/status
+    models: [],         // /v1/models: servable right now
+    model: "",
+    messages: [],       // {role, content, meta?, error?}
+    streaming: false,
+    abort: null,
+    upload: null,       // {name, pct} while a GGUF is on its way
+  },
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -191,7 +203,10 @@ async function poll() {
     trackRate(ov);
     state.ov = ov;
     if (!state.settings || state.saving === 0) state.settings = pickSettings(ov.status);
-    if (ov.status && ov.status.coordinator_up) await loadAuth();
+    if (ov.status && ov.status.coordinator_up) {
+      await loadAuth();
+      if (state.tab === "llm") await loadLlm();
+    }
     else { state.user = null; state.credits = null; }
   } catch (e) {
     state.ov = null;
@@ -234,6 +249,7 @@ function render() {
   renderUsage();
   renderGrantsLive();
   renderPool();
+  renderLlm();
 }
 
 // ------------------------------------------------------------ sidebar + tabs
@@ -248,6 +264,7 @@ function showTab(name) {
   $$(".view").forEach((v) => v.classList.toggle("is-on", v.id === `view-${name}`));
   $("#main").scrollTop = 0;
   if (name === "grants") loadGrants();
+  if (name === "llm" && status().coordinator_up) loadLlm().then(renderLlm);
 }
 
 function renderSidebar() {
@@ -353,7 +370,9 @@ function renderContributions() {
     setText("#c-state", `Contributing${job}`);
     setText("#c-detail", `Agent is ${st.agent_status || "running"}. Earning whenever the pool has work.`);
   } else {
-    const where = s.mode === "host" ? "hosted on this Mac" : (s.url || "no address set yet");
+    const where = s.mode === "host" ? "hosted on this Mac"
+      : s.mode === "public" ? (s.url || status().public_url || "public pool")
+      : (s.url || "no address set yet");
     setText("#c-state", "Not contributing");
     setText("#c-detail", `Start to lend this Mac to the pool (${where}). It runs in the background.`);
   }
@@ -412,6 +431,13 @@ function renderUsage() {
     ? `${withUnit(credits().balance)} available`
     : `≈ ${withUnit(credits().kept)} to spend`);
   $("#flop-budget").hidden = !signedIn();
+  const minMacs = $("#min_stages");
+  if ((state.settings || {}).mode === "public") {
+    minMacs.value = "1";
+    minMacs.disabled = true;
+  } else {
+    minMacs.disabled = false;
+  }
 
   const models = status().models || [];
   if (models.length && state.modelsShown !== models.join()) {
@@ -569,13 +595,17 @@ async function grantAction(path, body, okText) {
 function renderPool() {
   const st = status();
   const s = state.settings || {};
-  const host = s.mode !== "join";
-  $$("#p-mode button").forEach((b) => b.classList.toggle("is-on", b.dataset.mode === (host ? "host" : "join")));
-  $("#p-host").hidden = !host;
-  $("#p-join").hidden = host;
+  const mode = s.mode === "join" || s.mode === "public" ? s.mode : "host";
+  $$("#p-mode button").forEach((b) => b.classList.toggle("is-on", b.dataset.mode === mode));
+  $("#p-host").hidden = mode !== "host";
+  $("#p-join").hidden = mode !== "join";
+  $("#p-public").hidden = mode !== "public";
   setText("#p-ip", st.lan_ip || "—");
   const url = $("#url");
   if (document.activeElement !== url && url.value !== (s.url || "")) url.value = s.url || "";
+  const pub = $("#public-url");
+  const pubVal = s.url || st.public_url || "";
+  if (pub && document.activeElement !== pub && pub.value !== pubVal) pub.value = pubVal;
 
   const banner = $("#p-banner");
   banner.hidden = !st.last_error;
@@ -594,6 +624,7 @@ function renderPool() {
     ["This Mac's agent", st.agent_running, st.agent_running ? `${st.agent_status || "running"}${job}` : "not contributing"],
     ["Macs in pool", (st.nodes || 0) > 0, st.coordinator_up ? String(st.nodes || 0) : "—"],
     ["Jobs", (st.jobs || 0) > 0, st.coordinator_up ? String(st.jobs || 0) : "—"],
+    ["LLM node", !!st.inference_running, st.inference_running ? llmNodeState(st) : "not serving"],
     ["Address", st.coordinator_up, st.coordinator_url || "—"],
   ];
   renderOnce("status", rows, $("#p-status"), () => rows.map(([name, ok, value]) =>
@@ -616,9 +647,222 @@ function renderPool() {
       }).join("")}</tbody></table>`
     : `<p class="empty">No Macs connected yet. Start contributing here, or have others join.</p>`);
 
-  setText("#p-hint", host
+  setText("#p-hint", mode === "host"
     ? "Firewall: allow incoming TCP 8765 on this Mac and 9700 on each contributing Mac."
-    : "Firewall: allow incoming TCP 9700 on this Mac so pipeline peers can reach it.");
+    : mode === "public"
+      ? "Each Take runs on one signed-in Mac. Nobody opens ports at home."
+      : "Firewall: allow incoming TCP 9700 on this Mac so pipeline peers can reach it.");
+}
+
+// ------------------------------------------------------------ LLMs
+
+function llmNodeState(st) {
+  const n = st.inference_status || {};
+  if (n.available === false) return n.reason || "paused";
+  const busy = (n.pipelines || []).length ? "serving" : "ready";
+  return `${busy} · ${String(n.transport || "").toLowerCase() || "—"}`;
+}
+
+async function loadLlm() {
+  const l = state.llm;
+  try {
+    l.net = await api("/api/coord/inference/status");
+    l.models = ((await api("/api/coord/v1/models")) || {}).data || [];
+    if (!l.models.some((m) => m.id === l.model)) l.model = l.models.length ? l.models[0].id : "";
+  } catch {
+    l.net = null;
+    l.models = [];
+  }
+}
+
+function renderLlm() {
+  const st = status();
+  const s = state.settings || {};
+  const l = state.llm;
+  const net = l.net;
+  const up = !!st.coordinator_up;
+  const serving = net ? net.nodes.filter((n) => n.online && n.available) : [];
+  const pipe = net && net.pipelines.find((p) => p.model === l.model && !["stopped", "broken"].includes(p.state));
+  const live = st.inference_transport || (net && net.transport) || "";
+
+  setTag("#l-pill", !up ? "Offline" : l.models.length ? `${plural(l.models.length, "model")} ready` : "No models yet",
+    !up ? "hot" : l.models.length ? "ok" : "warn");
+  setText("#l-models", String(l.models.length));
+  setText("#l-models-sub", net ? `${plural(net.models.length, "known model")}, ${l.models.length} ready` : "ready to chat");
+  setText("#l-nodes", String(serving.length));
+  setText("#l-nodes-sub", net ? `${plural(net.nodes.length, "Mac")} registered` : "running llama.cpp");
+  setText("#l-speed", pipe && (pipe.live_tok_s || pipe.est_tok_s) ? (pipe.live_tok_s || pipe.est_tok_s).toFixed(1) : "—");
+  setText("#l-speed-sub", pipe ? (pipe.live_tok_s ? "tokens/s, last reply" : "tokens/s, estimated") : "tokens per second");
+  setText("#l-transport", live ? live.toUpperCase() : "—");
+  setText("#l-transport-sub", live === "relay" ? "RPC through the coordinator" : live ? "Macs talk directly on the LAN" : "");
+  setTag("#l-chat-tag", l.streaming ? "Replying" : pipe ? pipe.state : "Idle", l.streaming ? "ok" : "");
+
+  const sel = $("#l-model");
+  renderOnce("llm-models", [l.models.map((m) => m.id), l.model], sel, () => l.models.length
+    ? l.models.map((m) => `<option value="${esc(m.id)}"${m.id === l.model ? " selected" : ""}>${esc(m.id)} · ${esc(m.size_gb)} GB</option>`).join("")
+    : `<option value="">No model a head can serve yet</option>`);
+  $("#l-send").disabled = l.streaming || !l.model || !up;
+  $("#l-stop").disabled = !l.streaming;
+
+  const catalog = net ? net.models : [];
+  setText("#l-count", String(catalog.length));
+  renderOnce("llm-catalog", catalog, $("#l-catalog"), () => catalog.length ? catalog.map((m) => {
+    const dl = Object.entries(m.downloading || {}).map(([n, f]) => `${n} ${Math.round(f * 100)}%`).join(", ");
+    const tone = m.status === "rejected" ? "is-waiting" : m.servable ? "is-active" : "";
+    const where = m.status === "rejected" ? (m.status_reason || "rejected")
+      : dl ? `downloading on ${dl}` : m.heads.length ? `on ${m.heads.join(", ")}` : "no head has it yet";
+    const del = m.uploaded ? `<button type="button" class="btn ghost sm" data-act="llm-delete" data-model="${esc(m.id)}">Remove</button>` : "";
+    return `<div class="job ${tone}"><div class="job-top"><b>${esc(m.id)}</b>${del}</div>
+      <p class="meta">${esc(m.size_gb)} GB${m.arch ? ` · ${esc(m.arch)}` : ""} · ${esc(where)}</p></div>`;
+  }).join("") : `<p class="empty">${up ? "No models yet. Upload a GGUF, or put one in a head's models folder." : "Start or join a pool first."}</p>`);
+
+  const up_ = l.upload;
+  $("#l-upbar").hidden = !up_;
+  if (up_) $("#l-upbar i").style.width = `${Math.round(up_.pct * 100)}%`;
+  $("#l-pick").classList.toggle("is-disabled", !!up_ || !up);
+
+  setTag("#l-pipe-tag", pipe ? pipe.state : "None", pipe && pipe.state === "active" ? "ok" : "");
+  renderOnce("llm-pipe", pipe || null, $("#l-pipe"), () => pipe ? `
+    <table class="macs">
+      <thead><tr><th>Mac</th><th>Role</th><th>Layers</th><th>Share</th><th>Memory</th></tr></thead>
+      <tbody>${pipe.members.map((m) => `<tr>
+        <td><span class="who"><i class="sq ok"></i>${esc(m.node)}</span></td><td>${esc(m.role)}</td>
+        <td class="num">${m.layer_start}–${m.layer_end - 1}</td><td class="num">${Math.round(m.share * 100)}%</td>
+        <td class="num">${esc(m.memory_gb)} GB</td></tr>`).join("")}</tbody></table>
+    <p class="hint">${esc(pipe.explanation || "")}</p>
+    <button type="button" class="btn ghost sm" data-act="llm-unload" data-pipeline="${esc(pipe.id)}">Unload</button>`
+    : `<p class="empty">${l.model ? "Not loaded. Your first message plans a split across the pool and loads it." : "Pick a model to see how it's split."}</p>`);
+
+  const running = !!st.inference_running;
+  const n = st.inference_status || {};
+  setDot("#l-dot", running ? (n.available === false ? "hot" : "ok") : "", running && (n.pipelines || []).length > 0);
+  setText("#l-state", running ? `Serving · ${llmNodeState(st)}` : "Not serving");
+  setText("#l-detail", running
+    ? `${plural((n.models || []).length, "model")} on disk${Object.keys(n.downloads || {}).length ? ", downloading" : ""}. ${n.last_error || ""}`
+    : "Lend memory to run LLM layers. Uploaded models are pushed here if this Mac may head.");
+  const mem = $("#l-mem");
+  if (document.activeElement !== mem && s.inference_memory_gb != null) mem.value = s.inference_memory_gb;
+  const dir = $("#l-dir");
+  if (document.activeElement !== dir && s.models_dir) dir.value = s.models_dir;
+  $$("#l-role button").forEach((b) => b.classList.toggle("is-on", (b.dataset.llmHead === "1") === (s.inference_head !== false)));
+  $("#l-transport-field").hidden = s.mode === "join";
+  $$("#l-transport-seg button").forEach((b) => b.classList.toggle("is-on", b.dataset.transport === (s.transport || "direct")));
+  const toggle = $("#l-toggle");
+  if (!state.busy.has("llm")) {
+    toggle.textContent = running ? "Stop serving" : "Start serving";
+    toggle.className = `btn block ${running ? "ghost" : "primary"}`;
+    toggle.disabled = !state.ov;
+  }
+  renderChat();
+}
+
+function chatFooter(net) {
+  if (!net) return "";
+  const who = (net.members || []).map((m) => `${m.node} ${m.layers.length ? `L${m.layers[0]}–${m.layers[1]}` : ""}`.trim()).join(", ");
+  const tok = net.tok_s ? ` · ${net.tok_s.toFixed(1)} tok/s` : "";
+  return `≈ ${withUnit(net.flops)} · w=${(net.gen_weight || 1).toFixed(1)}${tok} · ${who}`;
+}
+
+function renderChat() {
+  const log = $("#l-log");
+  const msgs = state.llm.messages;
+  const stick = log.scrollHeight - log.scrollTop - log.clientHeight < 32;
+  const html = msgs.length ? msgs.map((m) => `<div class="say ${m.role === "user" ? "you" : "bot"}">
+      <label>${m.role === "user" ? "You" : "Pool"}</label>
+      <p>${m.error ? `<span class="hot">${esc(m.error)}</span>` : esc(m.content || (m.role === "assistant" ? "…" : ""))}</p>
+      ${m.meta ? `<small>${esc(m.meta)}</small>` : ""}</div>`).join("")
+    : `<p class="empty">Replies stream in here, token by token.</p>`;
+  if (log.innerHTML !== html) log.innerHTML = html;
+  if (stick) log.scrollTop = log.scrollHeight;
+}
+
+async function sendChat() {
+  const l = state.llm;
+  const draft = $("#l-draft");
+  const text = draft.value.trim();
+  if (!text || l.streaming) return;
+  if (!l.model) return setMsg("#l-msg", "No model to talk to yet. Upload a GGUF first.", "bad");
+  setMsg("#l-msg", "", "");
+  l.messages.push({ role: "user", content: text });
+  const reply = { role: "assistant", content: "" };
+  l.messages.push(reply);
+  draft.value = "";
+  l.streaming = true;
+  l.abort = new AbortController();
+  renderLlm();
+  const history = l.messages.filter((m) => m !== reply && !m.error).map((m) => ({ role: m.role, content: m.content }));
+  try {
+    const r = await fetch("/api/chat", {
+      method: "POST", credentials: "include", signal: l.abort.signal,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: l.model, messages: history, max_tokens: 512 }),
+    });
+    if (!r.ok) {
+      const t = await r.text();
+      let msg = t;
+      try { const d = JSON.parse(t); msg = (d.error && d.error.message) || d.detail || t; } catch { /* plain text */ }
+      throw new Error(msg || r.statusText);
+    }
+    const reader = r.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let cut;
+      while ((cut = buf.indexOf("\n\n")) >= 0) {
+        const event = buf.slice(0, cut);
+        buf = buf.slice(cut + 2);
+        for (const ln of event.split("\n")) {
+          const payload = ln.startsWith("data:") ? ln.slice(5).trim() : "";
+          if (!payload || payload === "[DONE]") continue;
+          const ev = JSON.parse(payload);
+          if (ev.error) reply.error = ev.error.message;
+          if (ev.network) reply.meta = chatFooter(ev.network);
+          const delta = ev.choices && ev.choices[0] && ev.choices[0].delta;
+          if (delta && delta.content) reply.content += delta.content;
+        }
+        renderChat();
+      }
+    }
+  } catch (e) {
+    if (e.name === "AbortError") reply.meta = "Stopped.";
+    else reply.error = e.message;
+  } finally {
+    l.streaming = false;
+    l.abort = null;
+    await loadLlm();
+    renderLlm();
+  }
+}
+
+function uploadModel(file) {
+  const l = state.llm;
+  if (!/\.gguf$/i.test(file.name)) return setMsg("#l-upmsg", "Pick a .gguf model file.", "bad");
+  l.upload = { name: file.name, pct: 0 };
+  setText("#l-file-name", file.name);
+  setMsg("#l-upmsg", "", "");
+  const xhr = new XMLHttpRequest();   // fetch() has no upload progress
+  xhr.open("POST", "/api/models/upload");
+  xhr.withCredentials = true;
+  xhr.setRequestHeader("x-filename", file.name);
+  xhr.upload.onprogress = (e) => { if (e.lengthComputable) { l.upload.pct = e.loaded / e.total; renderLlm(); } };
+  xhr.onload = async () => {
+    let data = null;
+    try { data = JSON.parse(xhr.responseText); } catch { /* plain text */ }
+    l.upload = null;
+    if (xhr.status >= 200 && xhr.status < 300) {
+      setMsg("#l-upmsg", `${data.name}: ${data.layers} layers, sent to ${plural(data.pushed, "head")}.`, "ok");
+    } else {
+      setMsg("#l-upmsg", (data && (data.detail || (data.error && data.error.message))) || xhr.statusText || "Upload failed.", "bad");
+    }
+    await loadLlm();
+    renderLlm();
+  };
+  xhr.onerror = () => { l.upload = null; setMsg("#l-upmsg", "Upload failed: the pool is not reachable.", "bad"); renderLlm(); };
+  xhr.send(file);
+  renderLlm();
 }
 
 // ------------------------------------------------------------ actions
@@ -640,6 +884,28 @@ async function withBusy(key, button, busyText, fn) {
 }
 
 const actions = {
+  "toggle-llm": (btn) => {
+    const st = status();
+    const running = !!st.inference_running;
+    return withBusy("llm", btn, running ? "Stopping…" : "Starting…", async () => {
+      const keep = { contribute: true, training: !!st.agent_running };   // leave fine-tune contribution as it is
+      const snap = await post("/api/start", { ...state.settings, ...keep, inference: !running });
+      if (snap.last_error) toast(snap.last_error, "bad");
+      else toast(running ? "Stopped serving. The current reply finishes first."
+        : "Serving. This Mac hosts LLM layers whenever a chat needs them.");
+    });
+  },
+  "llm-stop": () => { if (state.llm.abort) state.llm.abort.abort(); },
+  "llm-clear": () => { state.llm.messages = []; renderChat(); },
+  "llm-unload": (btn) => withBusy("llm-unload", btn, "Unloading…", async () => {
+    await post(`/api/coord/inference/pipelines/${encodeURIComponent(btn.dataset.pipeline)}/stop`);
+    toast("Unloading after the current reply.");
+    await loadLlm();
+  }),
+  "llm-delete": (btn) => withBusy(`llm-del-${btn.dataset.model}`, btn, "Removing…", async () => {
+    await api(`/api/coord/inference/models/${encodeURIComponent(btn.dataset.model)}`, { method: "DELETE" });
+    await loadLlm();
+  }),
   "toggle-contribute": (btn) => {
     const running = !!status().agent_running;
     return withBusy("contribute", btn, running ? "Stopping…" : "Starting…", async () => {
@@ -648,7 +914,7 @@ const actions = {
         toast("Stopped contributing. The current step finishes first.");
         return;
       }
-      const snap = await post("/api/start", { ...state.settings, contribute: true });
+      const snap = await post("/api/start", { ...state.settings, contribute: true, training: true });
       if (snap.last_error) toast(snap.last_error, "bad");
       else toast("Contributing. This Mac picks up work whenever the pool has some.");
     });
@@ -669,6 +935,17 @@ const actions = {
     const url = $("#url").value.trim();
     if (!url) throw new Error("Enter the host Mac's address, or press Find on LAN.");
     await saveSettings({ mode: "join", url });
+    const ov = await api("/api/overview");
+    if (!ov.status.coordinator_up) throw new Error(`No coordinator answering at ${ov.status.coordinator_url}.`);
+    toast(`Connected to ${ov.status.coordinator_url}`);
+  }),
+
+  "connect-public": (btn) => withBusy("connect", btn, "Connecting…", async () => {
+    if (!signedIn()) throw new Error("Sign in first.");
+    const url = $("#public-url").value.trim() || status().public_url || "";
+    if (!url) throw new Error("Enter the public coordinator URL.");
+    const snap = await post("/api/start", { ...state.settings, mode: "public", url });
+    if (snap.last_error) throw new Error(snap.last_error);
     const ov = await api("/api/overview");
     if (!ov.status.coordinator_up) throw new Error(`No coordinator answering at ${ov.status.coordinator_url}.`);
     toast(`Connected to ${ov.status.coordinator_url}`);
@@ -743,6 +1020,17 @@ document.addEventListener("click", async (e) => {
     await saveSettings({ mode: d.mode });
     return poll();
   }
+  if (d.llmHead) {
+    await saveSettings({ inference_head: d.llmHead === "1" });
+    return renderLlm();
+  }
+  if (d.transport) {
+    await saveSettings({ transport: d.transport });
+    toast(status().inference_running || status().coordinator_pid
+      ? "Saved. Start serving again to restart the pool on the new transport."
+      : "Saved. Used next time this Mac hosts.");
+    return renderLlm();
+  }
   if (d.sort) {
     state.sort = d.sort;
     return loadGrants();
@@ -810,6 +1098,10 @@ $("#url").addEventListener("keydown", (e) => {
   if (e.key === "Enter") actions.connect($("#p-connect"));
 });
 
+$("#public-url").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") actions["connect-public"]($("#p-connect-public"));
+});
+
 $("#dataset").addEventListener("change", (e) => {
   state.dataset = e.target.files[0] || null;
   const name = $("#dataset-name");
@@ -822,7 +1114,8 @@ $("#job-form").addEventListener("submit", (e) => {
   const msg = $("#job-msg");
   if (!state.dataset) return setMsg("#job-msg", "Choose a JSONL dataset first.", "bad");
   const steps = Number($("#steps").value);
-  const minStages = Number($("#min_stages").value);
+  const publicPool = (state.settings || {}).mode === "public";
+  const minStages = publicPool ? 1 : Number($("#min_stages").value);
   if (!Number.isInteger(steps) || steps < 1) return setMsg("#job-msg", "Steps must be a whole number above zero.", "bad");
   if (!Number.isInteger(minStages) || minStages < 1) return setMsg("#job-msg", "Min Macs must be at least 1.", "bad");
   const body = new FormData();
@@ -891,6 +1184,19 @@ $("#auth-form").addEventListener("submit", (e) => {
     loadGrants();
   });
 });
+
+$("#l-model").addEventListener("change", (e) => { state.llm.model = e.target.value; renderLlm(); });
+$("#l-mem").addEventListener("change", (e) => saveSettings({ inference_memory_gb: Math.max(0, Math.round(Number(e.target.value) || 0)) }));
+$("#l-dir").addEventListener("change", (e) => saveSettings({ models_dir: e.target.value.trim() || "~/models" }));
+$("#l-file").addEventListener("change", (e) => {
+  const f = e.target.files[0];
+  e.target.value = "";
+  if (f) uploadModel(f);
+});
+$("#l-draft").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); }
+});
+$("#chat-form").addEventListener("submit", (e) => { e.preventDefault(); sendChat(); });
 
 poll();
 loadGrants();

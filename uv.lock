@@ -1538,7 +1538,7 @@ requires-dist = [
     { name = "sqlmodel", specifier = ">=0.0.16" },
     { name = "typer", specifier = ">=0.12" },
     { name = "uvicorn", specifier = ">=0.29" },
-    { name = "websockets", specifier = ">=12" },
+    { name = "websockets", specifier = ">=14" },
     { name = "zeroconf", specifier = ">=0.131" },
 ]
 

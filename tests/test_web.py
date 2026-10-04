@@ -73,13 +73,20 @@ def test_index_and_css(tmp_path):
         assert c.get("/static/logo.png").status_code == 200
         assert b'data-file="community"' not in r.content
         assert b">COM<" not in r.content
+        assert b'data-mode="public"' in r.content
+        assert b"Public pool" in r.content
         js = c.get("/static/app.js")
         assert js.status_code == 200
         assert b"AUTH.sc" not in js.content
         assert b"/api/overview" in js.content
         assert b"GOOGLE" not in js.content
-        assert c.get("/static/app.css").status_code == 200
-        assert c.get("/static/fonts/archivo-black.woff2").status_code == 200
+        assert b"connect-public" in js.content
+        css = c.get("/static/app.css")
+        assert css.status_code == 200
+        assert b"IBM Plex Sans" in css.content
+        assert b"archivo-black" not in css.content
+        assert c.get("/static/fonts/ibm-plex-sans-regular.woff2").status_code == 200
+        assert c.get("/static/fonts/ibm-plex-mono-regular.woff2").status_code == 200
 
 
 def test_settings_and_status(tmp_path):
@@ -140,7 +147,7 @@ def test_proxy_allows_health_and_blocks_other(tmp_path):
         assert c.get("/api/coord/verify/secret").status_code == 404
         assert c.get("/api/coord/jobs/../verify/secret").status_code == 404
         assert c.get("/api/coord/VERIFY/secret").status_code == 404
-        assert c.get("/api/shell").json()["generation"] >= 5
+        assert c.get("/api/shell").json()["generation"] >= 6
 
 
 class RoutedHTTP:
@@ -191,6 +198,20 @@ def test_overview_offline(tmp_path):
     assert ov["me"]["flops"] == 0 and ov["me"]["rank"] is None
     assert ov["status"]["lan_ip"] == "192.168.1.20"
     assert ov["status"]["models"][0].endswith("0.5B-Instruct-4bit")
+    assert "public_url" in ov["status"]
+
+
+def test_settings_accept_public_mode(tmp_path, monkeypatch):
+    monkeypatch.setenv("SLASHCOMPUTE_PUBLIC_URL", "https://pool.example.com")
+    app, launcher, _ = _shell(tmp_path)
+    with TestClient(app) as c:
+        r = c.post("/api/settings", json={"mode": "public", "url": "", "gpu_percent": 40})
+        assert r.status_code == 200
+        assert r.json()["mode"] == "public"
+        ov = c.get("/api/overview").json()
+        assert ov["status"]["mode"] == "public"
+        assert ov["status"]["public_url"] == "https://pool.example.com"
+        assert ov["status"]["coordinator_url"] == "https://pool.example.com"
 
 
 def test_overview_online_ranks_this_mac(tmp_path):

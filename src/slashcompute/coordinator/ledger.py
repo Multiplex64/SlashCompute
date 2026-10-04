@@ -25,6 +25,11 @@ class Ledger:
         self.db.add(row)
         return row
 
+    def record_infer(self, node_id: str, job_id: str, flops: float, tokens: int, wall_s: float) -> None:
+        """One LLM request's share on one inference node (time-weighted FLOPs)."""
+        self.db.add(UsageRecord(kind="infer", job_id=job_id, node_id=node_id, flops=flops, tokens=tokens,
+                                wall_s=wall_s, busy_s=wall_s))
+
     def record_verify(self, node_id: str, job_id: str | None, usage: UsageSample) -> None:
         self.db.add(UsageRecord(
             kind="verify", job_id=job_id, node_id=node_id, flops=usage.flops,

@@ -45,6 +45,15 @@ def _ws_url(http_url: str) -> str:
     return base + "/ws/agent"
 
 
+def public_transport(url: str, public_pool: bool = False) -> bool:
+    """HTTPS or a public-pool flag: do not open a WAN pipeline."""
+    return bool(public_pool) or (url or "").lower().startswith("https://")
+
+
+def peered_assignment(asg: StageAssignment) -> bool:
+    return asg.prev_peer is not None or asg.next_peer is not None
+
+
 def _alive(pid: int) -> bool:
     try:
         os_kill = __import__("os").kill
@@ -194,6 +203,9 @@ class Daemon:
             log.warning("unhandled coordinator message %s", type(msg).__name__)
 
     async def _start_stage(self, asg: StageAssignment) -> None:
+        if public_transport(self.opt.coordinator, self.opt.cfg.public_pool) and peered_assignment(asg):
+            log.warning("refusing multi-peer assignment on public/https coordinator")
+            return
         if self._session or self._proc:
             log.warning("assignment while a stage is running; cancelling the old one")
             await self._cancel_stage()

@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from slashcompute.launcher.controller import (
-    Launcher, LauncherError, LauncherSettings, normalize_url,
+    Launcher, LauncherError, LauncherSettings, health_timeout, normalize_url,
 )
 
 
@@ -63,6 +63,10 @@ def test_normalize_url():
     assert normalize_url("192.168.1.10") == "http://192.168.1.10:8765"
     assert normalize_url("192.168.1.10:9000") == "http://192.168.1.10:9000"
     assert normalize_url("http://10.0.0.2:8765/") == "http://10.0.0.2:8765"
+    assert normalize_url("pool.example.com", scheme="https") == "https://pool.example.com:8765"
+    assert normalize_url("https://pool.example.com/") == "https://pool.example.com"
+    assert health_timeout("https://pool.example.com") == 5.0
+    assert health_timeout("http://10.0.0.1:8765") == 1.0
 
 
 def test_settings_persist(tmp_path):
@@ -86,6 +90,7 @@ def test_settings_corrupt_and_clamp(tmp_path):
     assert s.mode == "host"
     assert s.gpu_percent == 100
     assert s.contribute is True
+    assert LauncherSettings(mode="public").clamp().mode == "public"
 
 
 def test_coordinator_and_agent_argv(tmp_path):
@@ -109,6 +114,13 @@ def test_host_url_uses_lan_ip(tmp_path):
     assert launcher.coordinator_url(LauncherSettings(mode="host")) == "http://10.1.2.3:8765"
     assert launcher.coordinator_url(LauncherSettings(mode="join", url="10.1.2.9")) == (
         "http://10.1.2.9:8765"
+    )
+    assert launcher.coordinator_url(LauncherSettings(mode="public", url="pool.example.com")) == (
+        "https://pool.example.com:8765"
+    )
+    launcher.cfg.public_url = "https://pool.example.com"
+    assert launcher.coordinator_url(LauncherSettings(mode="public", url="")) == (
+        "https://pool.example.com"
     )
 
 
@@ -189,6 +201,31 @@ def test_start_join_without_health_fails(tmp_path):
     launcher = _launcher(tmp_path, http=FakeHTTP(None))
     with pytest.raises(LauncherError, match="No coordinator"):
         launcher.start(LauncherSettings(mode="join", url="http://10.0.0.8:8765"))
+
+
+def test_start_public_requires_url_and_token(tmp_path):
+    launcher = _launcher(tmp_path, http=FakeHTTP({"ok": True}))
+    with pytest.raises(LauncherError, match="public coordinator URL"):
+        launcher.start(LauncherSettings(mode="public", url="", session_token="tok"))
+    with pytest.raises(LauncherError, match="Sign in first"):
+        launcher.start(LauncherSettings(mode="public", url="https://pool.example.com"))
+    assert launcher._spawned == []  # type: ignore[attr-defined]
+
+
+def test_start_public_does_not_spawn_coordinator(tmp_path, monkeypatch):
+    launcher = _launcher(tmp_path, http=FakeHTTP({"ok": True, "nodes": 0, "jobs": 0}))
+    monkeypatch.setattr("slashcompute.launcher.controller.process_alive",
+                        lambda pid: any(p.pid == pid for p in launcher._spawned))
+    snap = launcher.start(LauncherSettings(
+        mode="public", url="https://pool.example.com", session_token="tok",
+        contribute=True,
+    ))
+    kinds = [p.argv[2] for p in launcher._spawned]  # type: ignore[attr-defined]
+    assert kinds == ["slashcompute.agent.main"]
+    assert snap.coordinator_pid is None
+    agent = launcher._spawned[0].argv  # type: ignore[attr-defined]
+    assert agent[agent.index("--url") + 1] == "https://pool.example.com"
+    assert agent[agent.index("--session-token") + 1] == "tok"
 
 
 def test_find_on_lan(tmp_path):
